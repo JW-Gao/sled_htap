@@ -111,6 +111,7 @@ pub struct TreeInner {
     pub(crate) subscribers: Subscribers,
     pub(crate) root: AtomicU64,
     pub(crate) merge_operator: RwLock<Option<Box<dyn MergeOperator>>>,
+    // last_key : Arc<Mutex<IVec>>,
 }
 
 impl Drop for TreeInner {
@@ -137,6 +138,10 @@ impl Deref for Tree {
         &self.0
     }
 }
+// use oneshot;
+use std::sync::OnceLock;
+static LAST_KEY: OnceLock<IVec> = OnceLock::new();
+
 
 impl Tree {
     /// Insert a key to a new value, returning the last value if it
@@ -476,8 +481,13 @@ impl Tree {
     pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<IVec>> {
         let mut guard = pin();
         let _cc = concurrency_control::read();
+
+        LAST_KEY.set(IVec::from(key.as_ref()));
+        let default_key = IVec::from(b"t1");
+        let key_value = LAST_KEY.get().unwrap_or(&default_key);
+
         loop {
-            if let Ok(get) = self.get_inner(key.as_ref(), &mut guard)? {
+            if let Ok(get) = self.get_inner(key_value.as_ref(), &mut guard)? {
                 return Ok(get);
             }
         }
