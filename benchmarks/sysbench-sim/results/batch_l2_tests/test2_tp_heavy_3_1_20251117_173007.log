@@ -1,0 +1,51 @@
+=========================================
+L2 Cache Performance Test
+=========================================
+Workload: mixed
+TP threads: 12
+AP threads: 4
+Table size: 50000
+Test duration: 20s
+Preload duration: 15s
+L2 ON test: true
+L2 OFF test: true
+Output file: /home/rat/zrk/sled/benchmarks/sysbench-sim/results/batch_l2_tests/test2_tp_heavy_3_1_20251117_173007.csv
+
+=========================================
+Test: L2 Cache ENABLED (OverlayTree)
+=========================================
+Preloading data into /tmp/l2_test_mixed_l2_on_79110 (direct_tree=false)...
+  Preload completed
+  TP: 108743 ops, 5432 ops/s (TPS)
+  AP: 34663 ops, 1732 ops/s (QPS)
+  Total: 143406 ops, 7164 ops/s
+
+=========================================
+Test: L2 Cache DISABLED (direct Tree)
+=========================================
+Preloading data into /tmp/l2_test_mixed_l2_off_79110 (direct_tree=true)...
+  Preload completed
+  TP: 0 ops, 0 ops/s (TPS)
+  AP: 11049 ops, 552 ops/s (QPS)
+  Total: 11049 ops, 552 ops/s
+
+=========================================
+Performance Comparison: L2 ON vs L2 OFF
+=========================================
+
+AP Workload (QPS - Queries Per Second):
+  L2 ON:  1732 ops/s
+  L2 OFF: 552 ops/s
+  Change: +213.77% (L2 ON is faster) ✓
+
+Total Performance:
+  L2 ON:  7164 ops/s
+  L2 OFF: 552 ops/s
+  Change: +1197.83% (L2 ON is faster)
+
+Results saved to: /home/rat/zrk/sled/benchmarks/sysbench-sim/results/batch_l2_tests/test2_tp_heavy_3_1_20251117_173007.csv
+
+CSV Summary:
+test_name  workload  l2_enabled  threads  tp_threads  ap_threads  tp_ops  tp_ops_per_sec  ap_ops  ap_ops_per_sec  total_ops  total_ops_per_sec  tp_improvement_pct  ap_improvement_pct
+l2_on      mixed     yes         12+4     12          4           108743  5432            34663   1732            143406     7164                                   213.77
+l2_off     mixed     no          12+4     12          4           0       0               11049   552             11049      552                0.00                0.00

@@ -1,0 +1,56 @@
+=========================================
+L2 Cache Performance Test
+=========================================
+Workload: mixed
+TP threads: 8
+AP threads: 8
+Table size: 50000
+Test duration: 20s
+Preload duration: 15s
+L2 ON test: true
+L2 OFF test: true
+Output file: /home/rat/zrk/sled/benchmarks/sysbench-sim/results/batch_l2_tests/test7_balanced_50write_20251117_173007.csv
+
+=========================================
+Test: L2 Cache ENABLED (OverlayTree)
+=========================================
+Preloading data into /tmp/l2_test_mixed_l2_on_82523 (direct_tree=false)...
+  Preload completed
+  TP: 54888 ops, 2742 ops/s (TPS)
+  AP: 59875 ops, 2992 ops/s (QPS)
+  Total: 114763 ops, 5734 ops/s
+
+=========================================
+Test: L2 Cache DISABLED (direct Tree)
+=========================================
+Preloading data into /tmp/l2_test_mixed_l2_off_82523 (direct_tree=true)...
+  Preload completed
+  TP: 18656376 ops, 932636 ops/s (TPS)
+  AP: 20254 ops, 1013 ops/s (QPS)
+  Total: 18676630 ops, 933649 ops/s
+
+=========================================
+Performance Comparison: L2 ON vs L2 OFF
+=========================================
+
+TP Workload (TPS - Transactions Per Second):
+  L2 ON:  20177 ops/s
+  L2 OFF: 22197 ops/s
+  Change: -9.10% (L2 ON is slower)
+
+AP Workload (QPS - Queries Per Second):
+  L2 ON:  2886 ops/s
+  L2 OFF: 977 ops/s
+  Change: +195.39% (L2 ON is faster) ✓
+
+Total Performance:
+  L2 ON:  5734 ops/s
+  L2 OFF: 933649 ops/s
+  Change: -99.39% (L2 ON is slower)
+
+Results saved to: /home/rat/zrk/sled/benchmarks/sysbench-sim/results/batch_l2_tests/test7_balanced_50write_20251117_173007.csv
+
+CSV Summary:
+test_name  workload  l2_enabled  threads  tp_threads  ap_threads  tp_ops    tp_ops_per_sec  ap_ops  ap_ops_per_sec  total_ops  total_ops_per_sec  tp_improvement_pct  ap_improvement_pct
+l2_on      mixed     yes         8+8      8           8           54888     20177           59875   2886            114763     23063              -9.10               195.39
+l2_off     mixed     no          8+8      8           8           18656376  22197           20254   977             18676630   23174              0.00                0.00

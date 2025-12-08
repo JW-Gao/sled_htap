@@ -214,6 +214,7 @@ mod sys_limits;
 mod threadpool;
 pub mod transaction;
 mod tree;
+mod overlay_tree;
 mod varint;
 
 /// Functionality for conditionally triggering failpoints under test.
@@ -283,6 +284,7 @@ pub use self::{
     subscriber::{Event, Subscriber},
     transaction::Transactional,
     tree::{CompareAndSwapError, Tree},
+    overlay_tree::OverlayTree,
 };
 
 #[cfg(feature = "metrics")]

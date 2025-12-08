@@ -1,0 +1,3 @@
+test_name,workload,l2_enabled,threads,tp_threads,ap_threads,ops,ops_per_sec,improvement_pct
+l2_on,mixed,yes,8+8,8,8,478805,23935,
+l2_off,mixed,no,8+8,8,8,9445173,472248,

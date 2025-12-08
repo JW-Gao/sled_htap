@@ -139,8 +139,6 @@ impl Deref for Tree {
     }
 }
 // use oneshot;
-use std::sync::OnceLock;
-static LAST_KEY: OnceLock<IVec> = OnceLock::new();
 
 
 impl Tree {
@@ -482,12 +480,9 @@ impl Tree {
         let mut guard = pin();
         let _cc = concurrency_control::read();
 
-        LAST_KEY.set(IVec::from(key.as_ref()));
-        let default_key = IVec::from(b"t1");
-        let key_value = LAST_KEY.get().unwrap_or(&default_key);
 
         loop {
-            if let Ok(get) = self.get_inner(key_value.as_ref(), &mut guard)? {
+            if let Ok(get) = self.get_inner(key.as_ref(), &mut guard)? {
                 return Ok(get);
             }
         }
