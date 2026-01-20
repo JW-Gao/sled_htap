@@ -182,6 +182,8 @@ macro_rules! testing_assert {
     };
 }
 
+
+/* zrk 所有数据的schema是 (k int, f float, c char(10))*/
 mod atomic_shim;
 mod backoff;
 mod batch;
@@ -214,7 +216,6 @@ mod sys_limits;
 mod threadpool;
 pub mod transaction;
 mod tree;
-mod overlay_tree;
 mod varint;
 
 /// Functionality for conditionally triggering failpoints under test.
@@ -274,6 +275,8 @@ pub use self::{
     serialization::Serialize,
 };
 
+pub mod schema;
+
 pub use self::{
     batch::Batch,
     config::{Config, Mode},
@@ -284,7 +287,6 @@ pub use self::{
     subscriber::{Event, Subscriber},
     transaction::Transactional,
     tree::{CompareAndSwapError, Tree},
-    overlay_tree::OverlayTree,
 };
 
 #[cfg(feature = "metrics")]

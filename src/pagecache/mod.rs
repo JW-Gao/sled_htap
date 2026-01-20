@@ -3,6 +3,8 @@
 #![allow(unsafe_code)]
 
 pub mod constants;
+pub mod metrics;
+pub mod l2_merger;
 pub mod logger;
 
 mod disk_pointer;
@@ -41,7 +43,7 @@ use self::{
     },
     header::Header,
     iobuf::{roll_iobuf, IoBuf, IoBufs},
-    iterator::{raw_segment_iter_from, LogIter},
+    iterator::{raw_segment_iter_from, DualLogIter, LogIter},
     pagetable::PageTable,
     segment::{SegmentAccountant, SegmentCleaner, SegmentOp},
 };
@@ -355,7 +357,7 @@ impl<'a> RecoveryGuard<'a> {
     /// reservation, releasing it.
     pub(crate) fn seal_batch(self) -> Result<()> {
         let max_reserved =
-            self.batch_res.log.iobufs.max_reserved_lsn.load(Acquire);
+            self.batch_res.log.hot_iobufs.max_reserved_lsn.load(Acquire);
         self.batch_res.mark_writebatch(max_reserved).map(|_| ())
     }
 }
@@ -367,7 +369,8 @@ impl<'a> RecoveryGuard<'a> {
 pub struct Page {
     update: Option<Update>, // 为什么要给一个update单独设一个entry呢，难道代表最新的增量吗
                             // 将要放入外存的数据的元信息在内存中的缓存
-    cache_infos: Vec<CacheInfo>,
+    pub cache_infos: Vec<CacheInfo>,
+    pub metrics: std::sync::Arc<metrics::PageMetrics>,
 }
 
 impl Page {
@@ -431,7 +434,7 @@ impl Page {
 /// A lock-free pagecache which supports linkmented pages
 /// for dramatically improving write throughput.
 #[derive(Clone)]
-pub struct PageCache(Arc<PageCacheInner>);
+pub struct PageCache(pub(crate) Arc<PageCacheInner>);
 
 impl Deref for PageCache {
     type Target = PageCacheInner;
@@ -461,6 +464,8 @@ pub struct PageCacheInner {
     snapshot_min_lsn: AtomicLsn,
     links: AtomicU64,
     snapshot_lock: Mutex<()>,
+    
+    pub(crate) l2_merger: Mutex<Option<Arc<l2_merger::L2Merger>>>,
 }
 
 impl Debug for PageCache {
@@ -483,7 +488,7 @@ impl Drop for PageCacheInner {
 
         // we can't as easily assert recovery
         // invariants across failpoints for now
-        if self.log.iobufs.config.global_error().is_ok() {
+        if self.log.hot_iobufs.config.global_error().is_ok() {
             let mut pages_before_restart = Map::default();
 
             let guard = pin();
@@ -599,6 +604,7 @@ impl PageCache {
             snapshot_min_lsn: AtomicLsn::new(snapshot.stable_lsn.unwrap_or(0)),
             links: AtomicU64::new(0),
             snapshot_lock: Mutex::new(()),
+            l2_merger: Mutex::new(None),
         };
 
         // now we read it back in
@@ -701,7 +707,16 @@ impl PageCache {
 
         trace!("pagecache started");
 
-        Ok(PageCache(Arc::new(pc)))
+        let pc_arc = Arc::new(pc);
+        
+        // Wire up L2 Merger
+        let (l2, _handle, _scanner) = l2_merger::L2Merger::start(
+            Arc::downgrade(&pc_arc),
+            pc_arc.config.l2_merge_scan_interval_ms,
+        );
+        *pc_arc.l2_merger.lock() = Some(Arc::new(l2));
+        
+        Ok(PageCache(pc_arc))
     }
 
     /// Try to atomically add a `PageLink` to the page.
@@ -762,7 +777,7 @@ impl PageCache {
         let node = old.as_node().apply(&new);
 
         // see if we should short-circuit replace
-        if old.cache_infos.len() >= PAGE_CONSOLIDATION_THRESHOLD {
+        if old.cache_infos.len() >= self.config.page_consolidation_threshold {
             log::trace!("skipping link, replacing pid {} with {:?}", pid, node);
             let short_circuit = self.replace(pid, old, &node, guard)?;
             return Ok(short_circuit.map_err(|a| a.map(|b| (b.0, new))));
@@ -778,6 +793,7 @@ impl PageCache {
         let mut new_page = Some(Owned::new(Page {
             update: Some(Update::Node(node)),
             cache_infos: Vec::default(),
+            metrics: old.metrics.clone(),
         }));
 
         loop {
@@ -785,7 +801,7 @@ impl PageCache {
             // 和持久化相关的吧， 哈哈哈！！！
             // 并不需要old page的数据，只需要新生成的new delta 和 pid
             let log_reservation =
-                self.log.reserve(LogKind::Link, pid, &new, guard)?; // 对应LLAMA中的reserve part
+                self.log.reserve(LogKind::Link, pid, &new, guard, false)?; // 对应LLAMA中的reserve part
             let lsn = log_reservation.lsn;
             let pointer = log_reservation.pointer;
 
@@ -827,9 +843,14 @@ impl PageCache {
                         guard.defer_destroy(old.read);
                     }
 
+                    if old.last_lsn() == 0 {
+                        error!("assertion failed: old.last_lsn() == 0 for pid {}. Old cache infos: {:?}", pid, old.cache_infos);
+                        // Also inspect the update causing this
+                        error!("New update: {:?}", new);
+                    }
                     assert_ne!(old.last_lsn(), 0);
 
-                    self.log.iobufs.sa_mark_link(pid, cache_info, guard);
+                    self.log.hot_iobufs.sa_mark_link(pid, cache_info, guard);
 
                     // NB complete must happen AFTER calls to SA, because
                     // when the iobuf's n_writers hits 0, we may transition
@@ -919,7 +940,7 @@ impl PageCache {
                         // If a page has multiple disk locations,
                         // rewrite it to a single one before storing
                         // a single 8-byte pointer to its cold location.
-                        if let Err(e) = self.rewrite_page(pid, None, &guard) {
+                        if let Err(e) = self.rewrite_page(pid, None, &guard, None) {
                             log::error!(
                                 "aborting fuzzy snapshot attempt after \
                                 failing to rewrite pid {}: {:?}",
@@ -942,13 +963,13 @@ impl PageCache {
 
                 // break out of this loop if the overall system
                 // has halted
-                self.log.iobufs.config.global_error()?;
+                self.log.hot_iobufs.config.global_error()?;
             }
         }
         drop(guard);
 
         let max_reserved_lsn_after: Lsn =
-            self.log.iobufs.max_reserved_lsn.load(Acquire);
+            self.log.hot_iobufs.max_reserved_lsn.load(Acquire);
 
         let snapshot = Snapshot {
             version: 0,
@@ -1038,7 +1059,11 @@ impl PageCacheInner {
 
             trace!("allocating pid {} for the first time", pid);
 
-            let new_page = Page { update: None, cache_infos: Vec::default() };
+            let new_page = Page { 
+                update: None, 
+                cache_infos: Vec::default(), 
+                metrics: std::sync::Arc::new(metrics::PageMetrics::new()) 
+            };
 
             let page_view = self.inner.insert(pid, new_page, guard);
 
@@ -1069,16 +1094,30 @@ impl PageCacheInner {
     pub(crate) fn attempt_gc(&self) -> Result<bool> {
         let guard = pin();
         let cc = concurrency_control::read();
-        let to_clean = self.log.iobufs.segment_cleaner.pop();
-        let ret = if let Some((pid_to_clean, segment_to_clean)) = to_clean {
-            self.rewrite_page(pid_to_clean, Some(segment_to_clean), &guard)
-                .map(|_| true)
-        } else {
-            Ok(false)
-        };
+        
+        // Try cleaning hot log
+        if let Some((pid_to_clean, segment_to_clean)) = self.log.hot_iobufs.segment_cleaner.pop() {
+             let ret = self.rewrite_page(pid_to_clean, Some(segment_to_clean), &guard, Some(false))
+                .map(|_| true);
+             drop(cc);
+             guard.flush();
+             return ret;
+        }
+
+        // Try cleaning cold log
+        if let Some(ref cold_iobufs) = self.log.cold_iobufs {
+            if let Some((pid_to_clean, segment_to_clean)) = cold_iobufs.segment_cleaner.pop() {
+                 let ret = self.rewrite_page(pid_to_clean, Some(segment_to_clean), &guard, Some(true))
+                    .map(|_| true);
+                 drop(cc);
+                 guard.flush();
+                 return ret;
+            }
+        }
+        
         drop(cc);
         guard.flush();
-        ret
+        Ok(false)
     }
 
     /// Initiate an atomic sequence of writes to the
@@ -1109,10 +1148,11 @@ impl PageCacheInner {
             BATCH_MANIFEST_PID,
             &BatchManifest::default(),
             guard,
+            false,
         )?;
 
         iobuf::maybe_seal_and_write_iobuf(
-            &self.log.iobufs,
+            &self.log.hot_iobufs,
             &batch_res.iobuf,
             batch_res.iobuf.get_header(),
             false,
@@ -1207,9 +1247,9 @@ impl PageCacheInner {
             self.cas_page(pid, old, Update::Node(new), false, guard)?;
 
         if let Some((pid_to_clean, segment_to_clean)) =
-            self.log.iobufs.segment_cleaner.pop()
+            self.log.hot_iobufs.segment_cleaner.pop()
         {
-            self.rewrite_page(pid_to_clean, Some(segment_to_clean), guard)?;
+            self.rewrite_page(pid_to_clean, Some(segment_to_clean), guard, Some(false))?;
         }
 
         Ok(result.map_err(|fail| {
@@ -1231,6 +1271,7 @@ impl PageCacheInner {
         pid: PageId,
         segment_to_purge_opt: Option<LogOffset>,
         guard: &Guard,
+        is_cold_purge: Option<bool>,
     ) -> Result<()> {
         #[cfg(feature = "metrics")]
         let _measure = Measure::new(&M.rewrite_page);
@@ -1248,6 +1289,12 @@ impl PageCacheInner {
                     .cache_infos
                     .iter()
                     .any(|ce| {
+                        if let Some(is_cold) = is_cold_purge {
+                            if ce.pointer.is_cold() != is_cold {
+                                return false;
+                            }
+                        }
+                        
                         if let Some(lid) = ce.pointer.lid() {
                             lid / self.config.segment_size as u64
                                 == purge_segment_id
@@ -1307,6 +1354,7 @@ impl PageCacheInner {
                 let new_page = Owned::new(Page {
                     update: page_view.update.clone(),
                     cache_infos: vec![cache_info],
+                    metrics: page_view.metrics.clone(),
                 });
 
                 debug_delay();
@@ -1322,7 +1370,7 @@ impl PageCacheInner {
                         guard.defer_destroy(page_view.read);
                     }
 
-                    self.log.iobufs.sa_mark_replace(
+                    self.log.hot_iobufs.sa_mark_replace(
                         pid,
                         &page_view.cache_infos,
                         cache_info,
@@ -1502,20 +1550,22 @@ impl PageCacheInner {
         let mut new_page = Some(Owned::new(Page {
             update: Some(update),
             cache_infos: Vec::default(),
+            metrics: old.metrics.clone(),
         }));
 
         loop {
             let mut page_ptr = new_page.take().unwrap();
             let log_reservation = match page_ptr.update.as_ref().unwrap() {
                 Update::Counter(ref c) => {
-                    self.log.reserve(log_kind, pid, c, guard)?
+                    self.log.reserve(log_kind, pid, c, guard, false)?
                 }
                 Update::Meta(ref m) => {
-                    self.log.reserve(log_kind, pid, m, guard)?
+                    self.log.reserve(log_kind, pid, m, guard, false)?
                 }
-                Update::Free => self.log.reserve(log_kind, pid, &(), guard)?,
+                Update::Free => self.log.reserve(log_kind, pid, &(), guard, false)?,
                 Update::Node(ref node) => {
-                    self.log.reserve(log_kind, pid, node, guard)?
+                    let is_cold = node.inner.base_offset.is_none();
+                    self.log.reserve(log_kind, pid, node, guard, is_cold)?
                 }
                 other => {
                     panic!("non-replacement used in cas_page: {:?}", other)
@@ -1555,12 +1605,52 @@ impl PageCacheInner {
                     }
 
                     trace!("cas_page succeeded on pid {}", pid);
-                    self.log.iobufs.sa_mark_replace( // 应该是在这里合并了old page的cache infos
-                        pid,
-                        &old.cache_infos,
-                        cache_info,
-                        guard,
-                    )?;
+                    let mut hot_removes = vec![];
+                    let mut cold_removes = vec![];
+
+                    for info in &old.cache_infos {
+                        if info.pointer.is_cold() {
+                            cold_removes.push(*info);
+                        } else {
+                            hot_removes.push(*info);
+                        }
+                    }
+
+                    if cache_info.pointer.is_cold() {
+                        self.log.cold_iobufs.as_ref().unwrap().sa_mark_replace(
+                            pid,
+                            &cold_removes,
+                            cache_info,
+                            guard,
+                        )?;
+                        if !hot_removes.is_empty() {
+                            self.log.hot_iobufs.sa_mark_remove(pid, &hot_removes, guard)?;
+                            for info in hot_removes {
+                                if let Some(heap_id) = info.pointer.heap_id() {
+                                    let heap = self.config.heap.clone();
+                                    guard.defer(move || heap.free(heap_id));
+                                }
+                            }
+                        }
+                    } else {
+                        self.log.hot_iobufs.sa_mark_replace(
+                            pid,
+                            &hot_removes,
+                            cache_info,
+                            guard,
+                        )?;
+                        if !cold_removes.is_empty() {
+                            if let Some(ref cold) = self.log.cold_iobufs {
+                                cold.sa_mark_remove(pid, &cold_removes, guard)?;
+                                for info in cold_removes {
+                                    if let Some(heap_id) = info.pointer.heap_id() {
+                                        let heap = self.config.heap.clone();
+                                        guard.defer(move || heap.free(heap_id));
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     // NB complete must happen AFTER calls to SA, because
                     // when the iobuf's n_writers hits 0, we may transition
@@ -1735,6 +1825,7 @@ impl PageCacheInner {
         let page = Owned::new(Page {
             update: Some(base_owned),
             cache_infos: page_view.cache_infos.clone(),
+            metrics: page_view.metrics.clone(),
         });
 
         debug_delay();
@@ -1836,7 +1927,7 @@ impl PageCacheInner {
                 // concurrency control) and it's possible we
                 // could cyclically wait if the reservation for
                 // a replacement happened inside a writebatch.
-                iobuf::make_durable(&self.log.iobufs, key.last_lsn())?;
+                iobuf::make_durable(&self.log.hot_iobufs, key.last_lsn())?;
             }
         }
 
@@ -1930,13 +2021,14 @@ impl PageCacheInner {
 
                 if page_view.cache_infos.len() > 1 {
                     // compress pages on page-out
-                    self.rewrite_page(pid, None, guard)?;
+                    self.rewrite_page(pid, None, guard, None)?;
                     continue 'pid;
                 }
 
                 let new_page = Owned::new(Page {
                     update: None,
                     cache_infos: page_view.cache_infos.clone(),
+                    metrics: page_view.metrics.clone(),
                 });
 
                 debug_delay();
@@ -1970,7 +2062,7 @@ impl PageCacheInner {
                 / u64::try_from(self.config.segment_size).unwrap(),
         );
 
-        iobuf::make_durable(&self.log.iobufs, lsn)?;
+        iobuf::make_durable(&self.log.hot_iobufs, lsn)?;
 
         let (header, bytes) = match self.log.read(pid, lsn, pointer) {
             Ok(LogRead::Inline(header, buf, _len)) => {
@@ -2099,6 +2191,7 @@ impl PageCacheInner {
                     cache_infos.push(cache_info);
                     assert!(self.free.lock().insert(pid));
                 }
+                PageState::Uninitialized => continue,
                 _ => panic!("tried to load a {:?}", state),
             }
 
@@ -2114,7 +2207,11 @@ impl PageCacheInner {
             } else {
                 None
             };
-            let page = Page { update, cache_infos };
+            let page = Page { 
+                update, 
+                cache_infos,
+                metrics: std::sync::Arc::new(metrics::PageMetrics::new()),
+            };
 
             self.inner.insert(pid, page, &guard);
         }

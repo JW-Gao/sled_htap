@@ -552,7 +552,9 @@ impl Serialize for PageState {
                     + base.serialized_size()
                     + frags.iter().map(Serialize::serialized_size).sum::<u64>()
             }
-            _ => panic!("tried to serialize {:?}", self),
+            PageState::Uninitialized => {
+                u64::MAX.serialized_size()
+            }
         }
     }
 
@@ -568,7 +570,9 @@ impl Serialize for PageState {
                 base.serialize_into(buf);
                 serialize_2tuple_ref_sequence(frags.iter(), buf);
             }
-            _ => panic!("tried to serialize {:?}", self),
+            PageState::Uninitialized => {
+                u64::MAX.serialize_into(buf);
+            }
         }
     }
 
@@ -582,6 +586,7 @@ impl Serialize for PageState {
                 i64::deserialize(buf)?,
                 DiskPtr::deserialize(buf)?,
             ),
+            u64::MAX => PageState::Uninitialized,
             _ => PageState::Present {
                 base: Serialize::deserialize(buf)?,
                 frags: deserialize_bounded_sequence(buf, len - 1)?,

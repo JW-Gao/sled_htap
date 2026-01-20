@@ -56,7 +56,7 @@
 
 #![allow(unused_results)]
 
-use std::{collections::BTreeSet, mem};
+use std::{collections::BTreeSet, mem, fs::File};
 
 use super::PageState;
 
@@ -75,6 +75,10 @@ pub(crate) enum SegmentOp {
         old_cache_infos: Vec<CacheInfo>,
         new_cache_info: CacheInfo,
     },
+    Remove {
+        pid: PageId,
+        cache_infos: Vec<CacheInfo>,
+    },
 }
 
 /// The segment accountant keeps track of the logical blocks
@@ -84,6 +88,8 @@ pub(crate) enum SegmentOp {
 pub(crate) struct SegmentAccountant {
     // static or one-time set
     config: RunningConfig,
+    file: Arc<File>,
+    is_cold: bool,
 
     // TODO these should be sharded to improve performance
     segments: Vec<Segment>,
@@ -241,7 +247,7 @@ impl Segment {
         lsn: Lsn,
         config: &RunningConfig,
     ) -> FastSet8<Lsn> {
-        trace!("setting Segment with lsn {:?} to Inactive", self.lsn());
+        trace!("setting Segment to Inactive",);
 
         let (inactive, ret) = if let Segment::Active(active) = self {
             assert!(lsn >= active.lsn);
@@ -285,7 +291,7 @@ impl Segment {
     }
 
     fn inactive_to_draining(&mut self, lsn: Lsn) -> BTreeSet<PageId> {
-        trace!("setting Segment with lsn {:?} to Draining", self.lsn());
+        trace!("setting Segment to Draining",);
 
         if let Segment::Inactive(inactive) = self {
             assert!(lsn >= inactive.lsn);
@@ -311,7 +317,7 @@ impl Segment {
     }
 
     fn draining_to_free(&mut self, lsn: Lsn) -> Lsn {
-        trace!("setting Segment with lsn {:?} to Free", self.lsn());
+        trace!("setting Segment to Free",);
 
         if let Segment::Draining(draining) = self {
             let old_lsn = draining.lsn;
@@ -336,7 +342,9 @@ impl Segment {
             Segment::Active(Active { lsn, .. })
             | Segment::Inactive(Inactive { lsn, .. })
             | Segment::Draining(Draining { lsn, .. }) => *lsn,
-            Segment::Free(_) => panic!("called lsn on Segment::Free"),
+            Segment::Free(_) => {
+                0
+            },
         }
     }
 
@@ -346,7 +354,7 @@ impl Segment {
         trace!(
             "inserting pid {} to segment lsn {:?} from segment {:?}",
             pid,
-            self.lsn(),
+            lsn,
             self
         );
         // if this breaks, maybe we didn't implement the transition
@@ -367,9 +375,8 @@ impl Segment {
 
     fn remove_pid(&mut self, pid: PageId, replacement_lsn: Lsn) {
         trace!(
-            "removing pid {} from segment lsn {:?} from segment {:?}",
+            "removing pid {} from segment lsn (unknown) from segment {:?}",
             pid,
-            self.lsn(),
             self
         );
         match self {
@@ -455,12 +462,17 @@ impl SegmentAccountant {
     pub(super) fn start(
         config: RunningConfig,
         snapshot: &Snapshot,
+        active_segment: Option<LogOffset>,
         segment_cleaner: SegmentCleaner,
+        file: Arc<File>,
+        is_cold: bool,
     ) -> Result<Self> {
         #[cfg(feature = "metrics")]
         let _measure = Measure::new(&M.start_segment_accountant);
         let mut ret = Self {
             config,
+            file,
+            is_cold,
             segments: vec![],
             free: BTreeSet::default(),
             tip: 0,
@@ -470,7 +482,7 @@ impl SegmentAccountant {
             async_truncations: BTreeMap::default(),
         };
 
-        ret.initialize_from_snapshot(snapshot)?;
+        ret.initialize_from_snapshot(snapshot, active_segment)?;
 
         if let Some(max_free) = ret.free.iter().max() {
             assert!(
@@ -512,9 +524,9 @@ impl SegmentAccountant {
         Ok(ret)
     }
 
-    fn initial_segments(&self, snapshot: &Snapshot) -> Result<Vec<Segment>> {
+    fn initial_segments(&self, snapshot: &Snapshot, active_segment: Option<LogOffset>) -> Result<Vec<Segment>> {
         let segment_size = self.config.segment_size;
-        let file_len = self.config.file.metadata()?.len();
+        let file_len = self.file.metadata()?.len();
         let number_of_segments =
             usize::try_from(file_len / segment_size as u64).unwrap()
                 + if file_len % segment_size as u64 == 0 { 0 } else { 1 };
@@ -525,7 +537,7 @@ impl SegmentAccountant {
 
         // sometimes the current segment is still empty, after only
         // recovering the segment header but no valid messages yet
-        if let Some(tip_lid) = snapshot.active_segment {
+        if let Some(tip_lid) = active_segment.or(snapshot.active_segment) {
             let tip_idx =
                 usize::try_from(tip_lid / segment_size as LogOffset).unwrap();
             if tip_idx == number_of_segments {
@@ -547,7 +559,10 @@ impl SegmentAccountant {
             );
         }
 
-        let mut add = |pid, lsn: Lsn, lid_opt: Option<LogOffset>| {
+        let mut add = |pid, lsn: Lsn, lid_opt: Option<LogOffset>, is_ptr_cold: bool| {
+            if is_ptr_cold != self.is_cold {
+                return;
+            }
             let lid = if let Some(lid) = lid_opt {
                 lid
             } else {
@@ -575,24 +590,24 @@ impl SegmentAccountant {
         for (pid, state) in snapshot.pt.iter().enumerate() {
             match state {
                 PageState::Present { base, frags } => {
-                    add(pid as PageId, base.0, base.1.lid());
+                    add(pid as PageId, base.0, base.1.lid(), base.1.is_cold());
                     for (lsn, ptr) in frags {
-                        add(pid as PageId, *lsn, ptr.lid());
+                        add(pid as PageId, *lsn, ptr.lid(), ptr.is_cold());
                     }
                 }
                 PageState::Free(lsn, ptr) => {
-                    add(pid as PageId, *lsn, ptr.lid());
+                    add(pid as PageId, *lsn, ptr.lid(), ptr.is_cold());
                 }
-                _ => panic!("tried to recover pagestate from a {:?}", state),
+                PageState::Uninitialized => {}
             }
         }
 
         Ok(segments)
     }
 
-    fn initialize_from_snapshot(&mut self, snapshot: &Snapshot) -> Result<()> {
+    fn initialize_from_snapshot(&mut self, snapshot: &Snapshot, active_segment: Option<LogOffset>) -> Result<()> {
         let segment_size = self.config.segment_size;
-        let segments = self.initial_segments(snapshot)?;
+        let segments = self.initial_segments(snapshot, active_segment)?;
 
         self.segments = segments;
 
@@ -635,7 +650,7 @@ impl SegmentAccountant {
             self.free_segment(segment_base)?;
             io_fail!(self.config, "zero garbage segment SA");
             pwrite_all(
-                &self.config.file,
+                &self.file,
                 &*vec![MessageKind::Corrupted.into(); self.config.segment_size],
                 segment_base,
             )?;
@@ -729,6 +744,36 @@ impl SegmentAccountant {
             Replace { pid, old_cache_infos, new_cache_info } => {
                 self.mark_replace(*pid, old_cache_infos, *new_cache_info)?
             }
+            Remove { pid, cache_infos } => self.mark_remove(*pid, cache_infos)?,
+        }
+        Ok(())
+    }
+
+    /// Explicitly remove pids from segments.
+    /// This is used when moving pointers between log streams.
+    pub(super) fn mark_remove(
+        &mut self,
+        pid: PageId,
+        cache_infos: &[CacheInfo],
+    ) -> Result<()> {
+        #[cfg(feature = "metrics")]
+        let _measure = Measure::new(&M.accountant_mark_link); // Re-use metric? Or new one?
+
+        trace!("mark_remove pid {} cache infos {:?}", pid, cache_infos);
+
+        for cache_info in cache_infos {
+             let ptr = &cache_info.pointer;
+             let lid = if let Some(lid) = ptr.lid() {
+                 lid
+             } else {
+                 continue;
+             };
+
+             let idx = self.segment_id(lid);
+             let lsn = self.config.normalize(cache_info.lsn);
+
+             self.segments[idx].remove_pid(pid, lsn);
+             self.possibly_clean_or_free_segment(idx, lsn)?;
         }
         Ok(())
     }
@@ -844,14 +889,16 @@ impl SegmentAccountant {
             * self.config.segment_size as Lsn;
 
         // a race happened, and our Lsn does not apply anymore
-        assert_eq!(
-            segment.lsn(),
-            segment_lsn,
-            "segment somehow got reused by the time a link was \
+        // a race happened, and our Lsn does not apply anymore
+        if segment.lsn() != segment_lsn {
+            warn!(
+             "segment somehow got reused by the time a link was \
              marked on it. expected lsn: {} actual: {}",
-            segment_lsn,
-            segment.lsn()
-        );
+             segment_lsn,
+             segment.lsn()
+            );
+            return;
+        }
 
         segment.insert_pid(pid, segment_lsn);
     }
@@ -987,6 +1034,31 @@ impl SegmentAccountant {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn ensure_segment_active(
+        &mut self,
+        lid: LogOffset,
+        lsn: Lsn,
+    ) {
+        let idx = self.segment_id(lid);
+        println!("Ensure SA active: lid {} lsn {} idx {} segments_len {}", lid, lsn, idx, self.segments.len());
+        if idx < self.segments.len() {
+             if self.segments[idx].is_free() {
+                 println!("Ensure SA active: Activating free segment at idx {}", idx);
+                 let segment_lsn = lsn / self.config.segment_size as Lsn * self.config.segment_size as Lsn;
+                 self.segments[idx].free_to_active(segment_lsn);
+                 
+                 let segment_start = (idx * self.config.segment_size) as LogOffset;
+                 self.free.remove(&segment_start);
+                 
+                 debug!("ensure_segment_active manually activated segment at lid {} lsn {}", lid, lsn);
+             } else {
+                 println!("Ensure SA active: Segment at idx {} is already {:?}", idx, self.segments[idx]);
+             }
+        } else {
+            println!("Ensure SA active: idx {} out of bounds (len {})", idx, self.segments.len());
+        }
     }
 
     /// Called after the trailer of a segment has been written to disk,

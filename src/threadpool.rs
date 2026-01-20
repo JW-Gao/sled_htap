@@ -258,7 +258,7 @@ pub fn take_fuzzy_snapshot(pc: crate::pagecache::PageCache) -> OneShot<()> {
         move || {
             if let Err(e) = pc.take_fuzzy_snapshot() {
                 log::error!("failed to write snapshot: {:?}", e);
-                pc.log.iobufs.set_global_error(e);
+                pc.log.hot_iobufs.set_global_error(e);
             }
         },
         &queue::SNAPSHOT_QUEUE,

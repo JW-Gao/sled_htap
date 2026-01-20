@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io};
+use std::{collections::BTreeMap, io, fs::File};
 
 use super::{
     pread_exact_or_eof, read_message, read_segment_header, BasedBuf, DiskPtr,
@@ -10,6 +10,7 @@ use crate::*;
 #[derive(Debug)]
 pub struct LogIter {
     pub config: RunningConfig,
+    pub file: Arc<File>,
     pub segments: BTreeMap<Lsn, LogOffset>,
     pub segment_base: Option<BasedBuf>,
     pub max_lsn: Option<Lsn>,
@@ -218,7 +219,7 @@ impl LogIter {
         assert!(
             lsn + self.config.segment_size as Lsn >= self.cur_lsn.unwrap_or(0)
         );
-        let f = &self.config.file;
+        let f = &self.file;
         let segment_header = read_segment_header(f, offset)?;
         if offset % self.config.segment_size as LogOffset != 0 {
             debug!("segment offset not divisible by segment length");
@@ -282,17 +283,19 @@ const fn valid_entry_offset(lid: LogOffset, segment_len: usize) -> bool {
 // Scan the log file if we don't know of any Lsn offsets yet,
 // and recover the order of segments, and the highest Lsn.
 fn scan_segment_headers_and_tail(
+    file: Arc<File>,
     min: Lsn,
     config: &RunningConfig,
 ) -> Result<(BTreeMap<Lsn, LogOffset>, Lsn)> {
     fn fetch(
+        file: Arc<File>,
         idx: u64,
         min: Lsn,
         config: &RunningConfig,
     ) -> Option<(LogOffset, SegmentHeader)> {
         let segment_len = u64::try_from(config.segment_size).unwrap();
         let base_lid = idx * segment_len;
-        let segment = read_segment_header(&config.file, base_lid).ok()?;
+        let segment = read_segment_header(&file, base_lid).ok()?;
         trace!(
             "SA scanned header at lid {} during startup: {:?}",
             base_lid,
@@ -337,10 +340,12 @@ fn scan_segment_headers_and_tail(
     let header_promises: Vec<_> = (0..segments)
         .map({
             // let config = config.clone();
+            let file = file.clone();
             move |idx| {
                 threadpool::spawn({
                     let config2 = config.clone();
-                    move || fetch(idx, min, &config2)
+                    let file = file.clone();
+                    move || fetch(file, idx, min, &config2)
                 })
             }
         })
@@ -385,6 +390,7 @@ fn scan_segment_headers_and_tail(
     // properly link their previous segment pointers.
     let end_of_last_contiguous_message_in_unstable_tail =
         check_contiguity_in_unstable_tail(
+            file.clone(),
             max_header_stable_lsn,
             &ordering,
             config,
@@ -399,6 +405,7 @@ fn scan_segment_headers_and_tail(
 // the last <# io buffers> segments will join up, and we
 // never reuse buffers within this safety range.
 fn check_contiguity_in_unstable_tail(
+    file: Arc<File>,
     max_header_stable_lsn: Lsn,
     ordering: &BTreeMap<Lsn, LogOffset>,
     config: &RunningConfig,
@@ -439,6 +446,7 @@ fn check_contiguity_in_unstable_tail(
 
     let mut iter = LogIter {
         config: config.clone(),
+        file,
         segments: logical_tail,
         segment_base: None,
         max_lsn: missing_item_in_tail,
@@ -465,15 +473,20 @@ fn check_contiguity_in_unstable_tail(
 /// and a set of segments that can be
 /// zeroed after the new snapshot is written,
 /// but no sooner, otherwise it is not crash-safe.
+/// Returns a log iterator, the max stable lsn,
+/// and a set of segments that can be
+/// zeroed after the new snapshot is written,
+/// but no sooner, otherwise it is not crash-safe.
 pub fn raw_segment_iter_from(
     lsn: Lsn,
     config: &RunningConfig,
+    file: Arc<File>,
 ) -> Result<LogIter> {
     let segment_len = config.segment_size as Lsn;
     let normalized_lsn = lsn / segment_len * segment_len;
 
     let (ordering, end_of_last_msg) =
-        scan_segment_headers_and_tail(normalized_lsn, config)?;
+        scan_segment_headers_and_tail(file.clone(), normalized_lsn, config)?;
 
     // find the last stable tip, to properly handle batch manifests.
     let tip_segment_iter: BTreeMap<_, _> = ordering
@@ -504,10 +517,60 @@ pub fn raw_segment_iter_from(
 
     Ok(LogIter {
         config: config.clone(),
+        file,
         max_lsn: Some(end_of_last_msg),
         cur_lsn: None,
         segment_base: None,
         segments,
         last_stage: true,
     })
+}
+
+pub struct DualLogIter {
+    pub hot_iter: LogIter,
+    pub cold_iter: Option<LogIter>,
+    pub hot_peek: Option<(LogKind, PageId, Lsn, DiskPtr)>,
+    pub cold_peek: Option<(LogKind, PageId, Lsn, DiskPtr)>,
+}
+
+impl DualLogIter {
+    pub fn new(mut hot_iter: LogIter, mut cold_iter: Option<LogIter>) -> Self {
+        let hot_peek = hot_iter.next();
+        let cold_peek = cold_iter.as_mut().and_then(|cb| cb.next());
+        Self { hot_iter, cold_iter, hot_peek, cold_peek }
+    }
+}
+
+impl Iterator for DualLogIter {
+    type Item = (LogKind, PageId, Lsn, DiskPtr);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match (&self.hot_peek, &self.cold_peek) {
+            (Some(h), Some(c)) => {
+                if h.2 <= c.2 {
+                    // Hot is older or equal (process first)
+                    // Take hot_peek and refill
+                    let ret = self.hot_peek.take();
+                    self.hot_peek = self.hot_iter.next();
+                    ret
+                } else {
+                    // Cold is older
+                    let ret = self.cold_peek.take();
+                    self.cold_peek = self.cold_iter.as_mut().unwrap().next();
+                    ret
+                }
+            }
+            (Some(_), None) => {
+                 let ret = self.hot_peek.take();
+                 self.hot_peek = self.hot_iter.next();
+                 ret
+            }
+            (None, Some(_)) => {
+                 let ret = self.cold_peek.take();
+                 self.cold_peek = self.cold_iter.as_mut().unwrap().next();
+                 ret
+            }
+            (None, None) => None,
+        }
+    }
 }

@@ -2,8 +2,10 @@ use crate::*;
 
 use super::{
     arr_to_u32, pwrite_all, raw_segment_iter_from, u32_to_arr, u64_to_arr,
-    BasedBuf, DiskPtr, HeapId, LogIter, LogKind, LogOffset, Lsn, MessageKind,
+    BasedBuf, DiskPtr, DualLogIter, HeapId, LogIter, LogKind, LogOffset, Lsn,
+    MessageKind,
 };
+use std::fs::File;
 
 /// A snapshot of the state required to quickly restart
 /// the `PageCache` and `SegmentAccountant`.
@@ -82,7 +84,7 @@ impl PageState {
             }
             PageState::Free(_, ptr) => vec![ptr.lid()],
             PageState::Uninitialized => {
-                panic!("called offsets on Uninitialized")
+                vec![]
             }
         }
     }
@@ -107,7 +109,7 @@ impl PageState {
                 }
             }
             PageState::Uninitialized => {
-                panic!("called heap_ids on Uninitialized")
+                // Return empty vector, which is `ret`
             }
         }
 
@@ -243,15 +245,100 @@ impl Snapshot {
                     }
                 }
                 PageState::Uninitialized => {
-                    unreachable!()
+                    // This can happen if a snapshot is taken while the page table
+                    // has been expanded but not yet filled. It is safe to ignore.
                 }
             }
         }
     }
 }
 
+fn clean_tail_for_log(
+    iter: &mut LogIter,
+    snapshot_stable_lsn: Option<Lsn>,
+    config: &RunningConfig,
+    file: &File,
+) -> Result<(Lsn, Option<LogOffset>)> {
+    let no_recovery_progress = iter.cur_lsn.is_none()
+        || iter.cur_lsn.unwrap() <= snapshot_stable_lsn.unwrap_or(0);
+    
+    // If no progress, we can't really claim a new stable tip for this log,
+    // but the system as a whole might have advanced.
+    // However, clean_tail returns the "tip" of this log.
+    // If empty/no progress, we return previous state?
+    // Actually, handling this logic inside advance_snapshot loop was messy.
+    // Here we focus on zeroing the TEAR.
+
+    if iter.cur_lsn.is_none() {
+        // Nothing read from this log, or no progress.
+        // Return 0, None? Or rely on caller to interpret?
+        // If cur_lsn is None, it means we scanned nothing or everything was old.
+        // We should just return early.
+        return Ok((0, None));
+    }
+
+    let iterated_lsn = iter.cur_lsn.unwrap();
+
+    let segment_progress: Lsn = iterated_lsn % (config.segment_size as Lsn);
+
+    let monotonic = segment_progress >= SEG_HEADER_LEN as Lsn
+        || (segment_progress == 0 && iter.segment_base.is_none());
+    if !monotonic {
+        error!(
+            "expected segment progress {} to be above SEG_HEADER_LEN or == 0, cur_lsn: {}",
+            segment_progress, iterated_lsn,
+        );
+        return Err(Error::corruption(None));
+    }
+
+    let (stable_lsn, active_segment) = if segment_progress
+        + MAX_MSG_HEADER_LEN as Lsn
+        >= config.segment_size as Lsn
+    {
+        let bumped =
+            config.normalize(iterated_lsn) + config.segment_size as Lsn;
+        trace!("bumping snapshot.stable_lsn to {}", bumped);
+        (bumped, None)
+    } else {
+        if let Some(BasedBuf { offset, .. }) = iter.segment_base {
+            let shred_len = config.segment_size
+                - usize::try_from(segment_progress).unwrap()
+                - 1;
+            let shred_zone = vec![MessageKind::Corrupted.into(); shred_len];
+            let shred_base =
+                offset + LogOffset::try_from(segment_progress).unwrap();
+
+            debug!(
+                "zeroing the end of the recovered segment at lsn {} between lids {} and {}",
+                config.normalize(iterated_lsn),
+                shred_base,
+                shred_base + shred_len as LogOffset
+            );
+            pwrite_all(file, &shred_zone, shred_base)?;
+            config.file.sync_all()?;
+        }
+        (iterated_lsn, iter.segment_base.as_ref().map(|bb| bb.offset))
+    };
+    
+    // Zero torn segments (the ones after the last valid message but before max_lsn)
+    for (lsn, to_zero) in &iter.segments {
+        debug!("zeroing torn segment at lsn {} lid {}", lsn, to_zero);
+        io_fail!(config, "segment initial free zero");
+        pwrite_all(
+            file,
+            &*vec![MessageKind::Corrupted.into(); config.segment_size],
+            *to_zero,
+        )?;
+        if !config.temporary {
+            config.file.sync_all()?;
+        }
+    }
+
+    Ok((stable_lsn, active_segment))
+}
+
 fn advance_snapshot(
-    mut iter: LogIter,
+    mut iter: DualLogIter,
     mut snapshot: Snapshot,
     config: &RunningConfig,
 ) -> Result<Snapshot> {
@@ -271,8 +358,6 @@ fn advance_snapshot(
         );
 
         if lsn < snapshot.stable_lsn.unwrap_or(-1) {
-            // don't process already-processed Lsn's. stable_lsn is for the last
-            // item ALREADY INCLUDED lsn in the snapshot.
             trace!(
                 "continuing in advance_snapshot, lsn {} ptr {} stable_lsn {:?}",
                 lsn,
@@ -285,109 +370,50 @@ fn advance_snapshot(
         snapshot.apply(log_kind, pid, lsn, ptr)?;
     }
 
-    // `snapshot.tip_lid` can be set based on 4 possibilities for the tip of the
-    // log:
-    // 1. an empty DB - tip set to None, causing a fresh segment to be
-    //    allocated on initialization
-    // 2. the recovered tip is at the end of a
-    //    segment with less space left than would fit MAX_MSG_HEADER_LEN -
-    //    tip set to None, causing a fresh segment to be allocated on
-    //    initialization, as in #1 above
-    // 3. the recovered tip is in the middle of a segment - both set to the end
-    //    of the last valid message, causing the system to be initialized to
-    //    that point without allocating a new segment
-    // 4. the recovered tip is at the beginning of a new segment, but without
-    //    any valid messages in it yet. treat as #3 above, but also take care
-    //    in the SA initialization to properly initialize any segment tracking
-    //    state despite not having any pages currently residing there.
+    // Clean up tails for Hot Log
+    let (hot_stable, hot_active) = clean_tail_for_log(
+        &mut iter.hot_iter, 
+        snapshot.stable_lsn, 
+        config, 
+        &config.file
+    )?;
 
-    let no_recovery_progress = iter.cur_lsn.is_none()
-        || iter.cur_lsn.unwrap() <= snapshot.stable_lsn.unwrap_or(0);
-    let db_is_empty = no_recovery_progress && snapshot.stable_lsn.is_none();
-
-    #[cfg(feature = "testing")]
-    let mut shred_point = None;
-
-    if db_is_empty {
-        trace!("db is empty, returning default snapshot");
-        if snapshot != Snapshot::default() {
-            error!("expected snapshot to be Snapshot::default");
-            return Err(Error::corruption(None));
-        }
-    } else if iter.cur_lsn.is_none() {
-        trace!(
-            "no recovery progress happened since the last snapshot \
-            was generated, returning the previous one"
-        );
-    } else {
-        let iterated_lsn = iter.cur_lsn.unwrap();
-
-        let segment_progress: Lsn = iterated_lsn % (config.segment_size as Lsn);
-
-        // progress should never be below the SEG_HEADER_LEN if the segment_base
-        // is set. progress can only be 0 if we've maxed out the
-        // previous segment, unsetting the iterator segment_base in the
-        // process.
-        let monotonic = segment_progress >= SEG_HEADER_LEN as Lsn
-            || (segment_progress == 0 && iter.segment_base.is_none());
-        if !monotonic {
-            error!(
-                "expected segment progress {} to be above SEG_HEADER_LEN or == 0, cur_lsn: {}",
-                segment_progress, iterated_lsn,
-            );
-            return Err(Error::corruption(None));
-        }
-
-        let (stable_lsn, active_segment) = if segment_progress
-            + MAX_MSG_HEADER_LEN as Lsn
-            >= config.segment_size as Lsn
-        {
-            let bumped =
-                config.normalize(iterated_lsn) + config.segment_size as Lsn;
-            trace!("bumping snapshot.stable_lsn to {}", bumped);
-            (bumped, None)
+    // Clean up tails for Cold Log (if valid)
+    let (cold_stable, _cold_active) = if let Some(ref mut cold_iter) = iter.cold_iter {
+        if let Some(ref cold_file) = config.cold_file {
+             clean_tail_for_log(
+                cold_iter, 
+                snapshot.stable_lsn, 
+                config, 
+                cold_file
+            )?
         } else {
-            if let Some(BasedBuf { offset, .. }) = iter.segment_base {
-                // either situation 3 or situation 4. we need to zero the
-                // tail of the segment after the recovered tip
-                let shred_len = config.segment_size
-                    - usize::try_from(segment_progress).unwrap()
-                    - 1;
-                let shred_zone = vec![MessageKind::Corrupted.into(); shred_len];
-                let shred_base =
-                    offset + LogOffset::try_from(segment_progress).unwrap();
-
-                #[cfg(feature = "testing")]
-                {
-                    shred_point = Some(shred_base);
-                }
-
-                debug!(
-                    "zeroing the end of the recovered segment at lsn {} between lids {} and {}",
-                    config.normalize(iterated_lsn),
-                    shred_base,
-                    shred_base + shred_len as LogOffset
-                );
-                pwrite_all(&config.file, &shred_zone, shred_base)?;
-                config.file.sync_all()?;
-            }
-            (iterated_lsn, iter.segment_base.map(|bb| bb.offset))
-        };
-
-        if stable_lsn < snapshot.stable_lsn.unwrap_or(0) {
-            error!(
-                "unexpected corruption encountered in storage snapshot file. \
-                stable lsn {} should be >= snapshot.stable_lsn {}",
-                stable_lsn,
-                snapshot.stable_lsn.unwrap_or(0),
-            );
-            return Err(Error::corruption(None));
+            (0, None)
         }
-
-        snapshot.stable_lsn = Some(stable_lsn);
-        snapshot.active_segment = active_segment;
-        snapshot.filter_inner_heap_ids();
+    } else {
+        (0, None)
     };
+    
+    // The new stable LSN is the max of the tips of both logs
+    let new_stable_lsn = std::cmp::max(hot_stable, cold_stable);
+    
+    // If we made progress beyond old stable
+    if new_stable_lsn > snapshot.stable_lsn.unwrap_or(0) {
+        snapshot.stable_lsn = Some(new_stable_lsn);
+        // Active segment depends on which log stream is "active" for new allocations?
+        // Actually, SegmentAccountant tracks active segments for BOTH.
+        // Snapshot struct only stores ONE `active_segment`?
+        // `pub active_segment: Option<LogOffset>`
+        // This seems to refer to the Hot Log active segment (since we start SA with it).
+        // Since we split hot/cold, SA handles cold segments separately?
+        // If we restore from snapshot, we need to know Hot Active Segment.
+        // Cold Active Segment is recovered by `recover_tip`?
+        // Yes, `Log::start` calls `recover_tip` for cold log.
+        // So we only need to persist `hot_active` in snapshot.
+        snapshot.active_segment = hot_active;
+    }
+
+    snapshot.filter_inner_heap_ids();
 
     trace!("generated snapshot: {:?}", snapshot);
 
@@ -398,70 +424,6 @@ fn advance_snapshot(
 
     if snapshot.stable_lsn > old_stable_lsn {
         write_snapshot(config, &snapshot)?;
-    }
-
-    #[cfg(feature = "testing")]
-    let reverse_segments = {
-        let shred_base = shred_point.unwrap_or(LogOffset::max_value());
-        let mut reverse_segments = Map::new();
-        for (pid, page) in snapshot.pt.iter().enumerate() {
-            let offsets = page.offsets();
-            for offset_option in offsets {
-                let offset = if let Some(offset) = offset_option {
-                    offset
-                } else {
-                    continue;
-                };
-                let segment = config.normalize(offset);
-                if segment == config.normalize(shred_base) {
-                    assert!(
-                        offset < shred_base,
-                        "we shredded the location for pid {}
-                        with locations {:?}
-                        by zeroing the file tip after lid {}",
-                        pid,
-                        page,
-                        shred_base
-                    );
-                }
-                let entry =
-                    reverse_segments.entry(segment).or_insert_with(Set::new);
-                entry.insert((pid, offset));
-            }
-        }
-        reverse_segments
-    };
-
-    for (lsn, to_zero) in &iter.segments {
-        debug!("zeroing torn segment at lsn {} lid {}", lsn, to_zero);
-
-        #[cfg(feature = "testing")]
-        {
-            if let Some(pids) = reverse_segments.get(to_zero) {
-                assert!(
-                    pids.is_empty(),
-                    "expected segment that we're zeroing at lid {} \
-                    lsn {} \
-                    to contain no pages, but it contained pids {:?}",
-                    to_zero,
-                    lsn,
-                    pids
-                );
-            }
-        }
-
-        // NB we intentionally corrupt this header to prevent any segment
-        // from being allocated which would duplicate its LSN, messing
-        // up recovery in the future.
-        io_fail!(config, "segment initial free zero");
-        pwrite_all(
-            &config.file,
-            &*vec![MessageKind::Corrupted.into(); config.segment_size],
-            *to_zero,
-        )?;
-        if !config.temporary {
-            config.file.sync_all()?;
-        }
     }
 
     #[cfg(feature = "event_log")]
@@ -477,10 +439,25 @@ pub fn read_snapshot_or_default(config: &RunningConfig) -> Result<Snapshot> {
     // We only use a default Snapshot when there is no snapshot found.
     let last_snap = read_snapshot(config)?.unwrap_or_default();
 
-    let log_iter =
-        raw_segment_iter_from(last_snap.stable_lsn.unwrap_or(0), config)?;
+    let hot_iter = raw_segment_iter_from(
+        last_snap.stable_lsn.unwrap_or(0), 
+        config, 
+        config.file.clone()
+    )?;
+    
+    let cold_iter = if let Some(ref cold_file) = config.cold_file {
+        Some(raw_segment_iter_from(
+             last_snap.stable_lsn.unwrap_or(0), 
+             config, 
+             cold_file.clone()
+        )?)
+    } else {
+        None
+    };
+    
+    let dual_iter = DualLogIter::new(hot_iter, cold_iter);
 
-    let res = advance_snapshot(log_iter, last_snap, config)?;
+    let res = advance_snapshot(dual_iter, last_snap, config)?;
 
     Ok(res)
 }

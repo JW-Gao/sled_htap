@@ -527,9 +527,24 @@ impl Tree {
 
         let pair = node_view.node_kv_pair(key.as_ref());
 
-        let ret = f(pair.1);
+        let ret = f(pair.1.as_deref());
 
         Ok(ret)
+    }
+
+    /// Create an iterator that efficiently scans the 'f' column from Base Nodes.
+    /// This skips any Delta Node updates (L0/L1) for maximum throughput.
+    ///
+    /// # Note
+    /// This is an "Approximation" scan. It trades consistency for speed.
+    pub fn scan_column(&self, col_idx: usize) -> ColumnScanIter {
+        ColumnScanIter {
+            tree: self.clone(),
+            low_key: IVec::default(),
+            current_node: None,
+            current_index: 0,
+            col_idx,
+        }
     }
 
     pub(crate) fn get_inner(
@@ -545,7 +560,7 @@ impl Tree {
         let View { node_view, .. } = self.view_for_key(key.as_ref(), guard)?;
 
         let pair = node_view.node_kv_pair(key.as_ref());
-        let val = pair.1.map(IVec::from);
+        let val = pair.1.map(|v| IVec::from(v.as_ref()));
 
         Ok(Ok(val))
     }
@@ -670,12 +685,12 @@ impl Tree {
 
             if !matches {
                 return Ok(Err(CompareAndSwapError {
-                    current: current_value.map(IVec::from),
+                    current: current_value.map(|v| IVec::from(v.as_ref())),
                     proposed: new2,
                 }));
             }
 
-            if current_value == new2.as_ref().map(AsRef::as_ref) {
+            if current_value.as_deref() == new2.as_ref().map(AsRef::as_ref) {
                 // short-circuit no-op write. this is still correct
                 // because we verified that the input matches, so
                 // doing the work has the same semantic effect as not
@@ -1186,7 +1201,7 @@ impl Tree {
             let tmp = current_value.as_ref().map(AsRef::as_ref);
             let new_opt = merge_operator(key, tmp, value).map(IVec::from);
 
-            if new_opt.as_ref().map(AsRef::as_ref) == current_value {
+            if new_opt.as_ref().map(AsRef::as_ref) == current_value.as_deref() {
                 // short-circuit no-op write
                 return Ok(Ok(new_opt));
             }
@@ -1428,7 +1443,7 @@ impl Tree {
         while let Some(last) = upper.pop() {
             if last < u8::max_value() {
                 upper.push(last + 1);
-                return self.range(prefix_ref..&upper);
+                return self.range(prefix_ref..upper.as_slice());
             }
         }
 
@@ -2548,3 +2563,58 @@ impl fmt::Display for CompareAndSwapError {
 }
 
 impl std::error::Error for CompareAndSwapError {}
+
+/// Iterator for efficient column scanning of the 'f' column.
+/// This iterator skips Delta Nodes (L0/L1) and directly reads Base Nodes (L2).
+pub struct ColumnScanIter {
+    tree: Tree,
+    low_key: IVec,
+    current_node: Option<Arc<crate::node::Inner>>,
+    current_index: usize,
+    col_idx: usize,
+}
+
+impl Iterator for ColumnScanIter {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(inner) = &self.current_node {
+                // Try to read next item from the current node
+                if let Some(val) = inner.get_columnar_value(self.col_idx, self.current_index) {
+                     self.current_index += 1;
+                     return Some(val);
+                }
+                
+                // If we ran out of items in this node, move to the next node
+                if self.current_index >= inner.children() as usize {
+                    if let Some(h) = inner.hi() {
+                        self.low_key = IVec::from(h);
+                        self.current_node = None;
+                        self.current_index = 0;
+                        continue;
+                    } else {
+                        return None; // End of tree
+                    } 
+                 } else {
+                     // get_column_f returned None (invalid) but index < children?
+                     self.current_index += 1;
+                     continue;
+                 }
+            } else {
+                // Fetch the node corresponding to low_key
+                let guard = pin();
+                match self.tree.view_for_key(&self.low_key, &guard) {
+                    Ok(view) => {
+                         self.current_node = Some(view.inner.clone());
+                         self.current_index = 0;
+                    }
+                    Err(_) => {
+                         // End of scan or error
+                         return None;
+                    }
+                }
+            } 
+        }
+    }
+}

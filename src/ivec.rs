@@ -252,6 +252,12 @@ impl From<Box<[u8]>> for IVec {
     }
 }
 
+impl From<std::borrow::Cow<'_, [u8]>> for IVec {
+    fn from(v: std::borrow::Cow<'_, [u8]>) -> Self {
+        IVec::new(&v)
+    }
+}
+
 impl std::borrow::Borrow<[u8]> for IVec {
     fn borrow(&self) -> &[u8] {
         self.as_ref()

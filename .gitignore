@@ -26,3 +26,4 @@ artifacts
 cargo-timing*
 .vscode/*
 .cache/*
+compression*

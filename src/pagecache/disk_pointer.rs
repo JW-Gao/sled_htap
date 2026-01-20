@@ -12,9 +12,15 @@ pub enum DiskPtr {
     Heap(Option<NonZeroU64>, HeapId),
 }
 
+pub(crate) const STREAM_SELECTOR_MASK: u64 = 1 << 63;
+
 impl DiskPtr {
     pub(crate) const fn new_inline(l: LogOffset) -> Self {
         DiskPtr::Inline(l)
+    }
+
+    pub(crate) const fn new_cold(l: LogOffset) -> Self {
+        DiskPtr::Inline(l | STREAM_SELECTOR_MASK)
     }
 
     pub(crate) fn new_heap_item(lid: LogOffset, heap_id: HeapId) -> Self {
@@ -23,6 +29,22 @@ impl DiskPtr {
 
     pub(crate) const fn is_inline(&self) -> bool {
         matches!(self, DiskPtr::Inline(_))
+    }
+
+    pub(crate) fn is_cold(&self) -> bool {
+        match self {
+            DiskPtr::Inline(lid) => lid & STREAM_SELECTOR_MASK != 0,
+            DiskPtr::Heap(Some(lid), _) => lid.get() & STREAM_SELECTOR_MASK != 0,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn to_raw_offset(&self) -> LogOffset {
+        match self {
+            DiskPtr::Inline(lid) => lid & !STREAM_SELECTOR_MASK,
+            DiskPtr::Heap(Some(lid), _) => lid.get() & !STREAM_SELECTOR_MASK,
+            _ => panic!("called to_raw_offset on invalid DiskPtr"),
+        }
     }
 
     pub(crate) const fn is_heap_item(&self) -> bool {
@@ -38,10 +60,10 @@ impl DiskPtr {
     }
 
     #[doc(hidden)]
-    pub const fn lid(&self) -> Option<LogOffset> {
+    pub fn lid(&self) -> Option<LogOffset> {
         match self {
-            DiskPtr::Inline(lid) => Some(*lid),
-            DiskPtr::Heap(Some(lid), _) => Some(lid.get()),
+            DiskPtr::Inline(lid) => Some(*lid & !STREAM_SELECTOR_MASK),
+            DiskPtr::Heap(Some(lid), _) => Some(lid.get() & !STREAM_SELECTOR_MASK),
             DiskPtr::Heap(None, _) => None,
         }
     }

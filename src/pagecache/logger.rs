@@ -17,7 +17,8 @@ use crate::*;
 #[derive(Debug)]
 pub struct Log {
     /// iobufs is the underlying lock-free IO write buffer.
-    pub(crate) iobufs: Arc<IoBufs>,
+    pub(crate) hot_iobufs: Arc<IoBufs>,
+    pub(crate) cold_iobufs: Option<Arc<IoBufs>>,
     pub(crate) config: RunningConfig,
 }
 
@@ -25,25 +26,90 @@ impl Log {
     /// Start the log, open or create the configured file,
     /// and optionally start the periodic buffer flush thread.
     pub fn start(config: RunningConfig, snapshot: &Snapshot) -> Result<Self> {
-        let iobufs = Arc::new(IoBufs::start(config.clone(), snapshot)?);
+        let (hot_lid, hot_lsn) = snapshot.recovered_coords(config.segment_size);
+        
+        let (cold_lid, cold_lsn) = if let Some(ref cold_file) = config.cold_file {
+            recover_tip(cold_file, config.segment_size)?
+        } else {
+            (LogOffset::default(), Lsn::default())
+        };
 
-        Ok(Self { iobufs, config })
+        // Determine the next global LSN from the max of both logs
+        let hot_next = hot_lsn.unwrap_or(0);
+        let cold_next = cold_lsn;
+        let max_lsn = std::cmp::max(hot_next, cold_next);
+
+        // Create the shared LSN generator
+        let shared_lsn_generator = Arc::new(AtomicLsn::new(max_lsn));
+
+
+        let hot_iobufs = Arc::new(IoBufs::start(
+            config.clone(),
+            snapshot,
+            config.file.clone(),
+            hot_lid,
+            hot_lsn,
+            false,
+            Some(shared_lsn_generator.clone()),
+        )?);
+
+        let cold_iobufs = if let Some(ref cold_file) = config.cold_file {
+            // Re-recover tip (or use previously recovered values, but IoBufs re-calculates part of it if we pass Lid/Lsn)
+            // Actually, we should pass the values we already recovered. 
+            // IoBufs::start takes Option<Lid> and Option<Lsn>
+            
+            // Wait, recover_tip returns (LogOffset, Lsn) while IoBufs expects Option.
+            // If they are 0, does it mean None? 
+            // recover_tip returns actual tip. If file is empty, it returns 0,0?
+            // Let's assume recover_tip returns valid coordinates for where to append.
+            // If the file is fresh, it might be 0.
+            
+            // IoBufs logic: if None, None -> fresh. if Some, Some -> recovered.
+            // If recover_tip returns 0, 0 for empty file -> that is "recovered at 0". 
+            // But IoBufs expects None for fresh?
+            // Use Some if file existed. 
+            
+            // Since we call recover_tip, the file exists (we opened it).
+            // But if it's empty? recover_tip implementation handles that.
+            
+            Some(Arc::new(IoBufs::start(
+                config.clone(),
+                snapshot,
+                cold_file.clone(),
+                Some(cold_lid),
+                Some(cold_lsn),
+                true,
+                Some(shared_lsn_generator.clone()),
+            )?))
+        } else {
+            None
+        };
+
+        Ok(Self { hot_iobufs, cold_iobufs, config })
     }
 
     /// Flushes any pending IO buffers to disk to ensure durability.
     /// Returns the number of bytes written during this call.
+    /// Flushes any pending IO buffers to disk to ensure durability.
+    /// Returns the number of bytes written during this call.
     pub fn flush(&self) -> Result<usize> {
-        iobuf::flush(&self.iobufs)
+        let mut written = iobuf::flush(&self.hot_iobufs)?;
+        if let Some(ref cold) = self.cold_iobufs {
+            written += iobuf::flush(cold)?;
+        }
+        Ok(written)
     }
 
     /// Return an iterator over the log, starting with
     /// a specified offset.
+    /// Return an iterator over the log, starting with
+    /// a specified offset.
     pub fn iter_from(&self, lsn: Lsn) -> super::LogIter {
-        self.iobufs.iter_from(lsn)
+        self.hot_iobufs.iter_from(lsn)
     }
 
     pub(crate) fn roll_iobuf(&self) -> Result<usize> {
-        roll_iobuf(&self.iobufs)
+        roll_iobuf(&self.hot_iobufs)
     }
 
     /// read a buffer from the disk
@@ -55,12 +121,24 @@ impl Log {
                 / u64::try_from(self.config.segment_size).unwrap(),
         );
 
-        iobuf::make_durable(&self.iobufs, lsn)?;
+        if ptr.is_cold() {
+            if let Some(ref cold) = self.cold_iobufs {
+                iobuf::make_durable(cold, lsn)?;
+            }
+        } else {
+            iobuf::make_durable(&self.hot_iobufs, lsn)?;
+        }
 
         if ptr.is_inline() {
-            let f = &self.config.file;
+            // [Dual Log Stream] Route read based on MSB
+            let f = if ptr.is_cold() {
+                 self.config.cold_file.as_ref().expect("cold file must enable for cold ptr").as_ref()
+            } else {
+                 self.config.file.as_ref()
+            };
+
             read_message(
-                &**f,
+                f,
                 ptr.lid().unwrap(),
                 expected_segment_number,
                 &self.config,
@@ -85,7 +163,7 @@ impl Log {
 
     /// returns the current stable offset written to disk
     pub fn stable_offset(&self) -> Lsn {
-        self.iobufs.stable()
+        self.hot_iobufs.stable()
     }
 
     /// blocks until the specified log sequence number has
@@ -94,7 +172,19 @@ impl Log {
     /// as a full consistency-barrier for all data written
     /// up until this point.
     pub fn make_stable(&self, lsn: Lsn) -> Result<usize> {
-        iobuf::make_stable(&self.iobufs, lsn)
+        // We flush cold log too to be safe, although lsn refers to hot log.
+        if let Some(ref cold) = self.cold_iobufs {
+            iobuf::flush(cold)?;
+        }
+        iobuf::make_stable(&self.hot_iobufs, lsn)
+    }
+
+    pub fn current_lsn(&self) -> Lsn {
+        self.hot_iobufs.max_reserved_lsn.load(SeqCst)
+    }
+
+    pub fn max_header_stable_lsn(&self) -> Lsn {
+        self.hot_iobufs.max_header_stable_lsn.load(SeqCst)
     }
 
     /// Reserve a replacement buffer for a previously written
@@ -113,10 +203,11 @@ impl Log {
             &heap_pointer,
             Some(heap_pointer),
             guard,
+            false, // Heap rewrites go to Hot Log
         );
 
         if let Err(e) = &ret {
-            self.iobufs.set_global_error(*e);
+            self.hot_iobufs.set_global_error(*e);
         }
 
         ret
@@ -136,11 +227,12 @@ impl Log {
         pid: PageId,
         item: &T,
         guard: &Guard,
+        is_cold: bool,
     ) -> Result<Reservation<'_>> { // get lsn && disk_ptr
-        let ret = self.reserve_inner(log_kind, pid, item, None, guard);
+        let ret = self.reserve_inner(log_kind, pid, item, None, guard, is_cold);
 
         if let Err(e) = &ret {
-            self.iobufs.set_global_error(*e);
+            self.hot_iobufs.set_global_error(*e);
         }
 
         ret
@@ -153,7 +245,13 @@ impl Log {
         item: &T,
         heap_rewrite: Option<HeapId>,
         _: &Guard,
+        is_cold: bool,
     ) -> Result<Reservation<'_>> {
+        let iobufs = if is_cold {
+            self.cold_iobufs.as_ref().unwrap()
+        } else {
+            &self.hot_iobufs
+        };
         #[cfg(feature = "metrics")]
         let _measure = Measure::new(&M.reserve_lat);
 
@@ -167,7 +265,7 @@ impl Log {
         #[cfg(feature = "metrics")]
         M.reserve_sz.measure(max_buf_len);
 
-        let max_buf_size = usize::try_from(super::heap::MIN_SZ * 15 / 16)
+          let max_buf_size = usize::try_from(super::heap::MIN_SZ * 15 / 16)
             .unwrap()
             .min(self.config.segment_size - SEG_HEADER_LEN);
 
@@ -248,18 +346,18 @@ impl Log {
             // don't continue if the system
             // has encountered an issue.
             if let Err(e) = self.config.global_error() {
-                let intervals = self.iobufs.intervals.lock();
+                let intervals = iobufs.intervals.lock();
 
                 // having held the mutex makes this linearized
                 // with the notify below.
                 drop(intervals);
 
-                let _notified = self.iobufs.interval_updated.notify_all();
+                let _notified = iobufs.interval_updated.notify_all();
                 return Err(e);
             }
 
             // load current header value
-            let iobuf = self.iobufs.current_iobuf();
+            let iobuf = iobufs.current_iobuf();
             let header = iobuf.get_header();
             let buf_offset = header::offset(header);
             let reservation_lsn =
@@ -329,7 +427,7 @@ impl Log {
                 // there are zero writers.
                 trace_once!("io buffer too full, spinning");
                 iobuf::maybe_seal_and_write_iobuf(
-                    &self.iobufs,
+                    iobufs,
                     &iobuf,
                     header,
                     true,
@@ -392,7 +490,7 @@ impl Log {
                 reservation_lid,
             );
 
-            self.iobufs
+            iobufs
                 .max_reserved_lsn
                 .fetch_max(reservation_lsn + inline_buf_len as Lsn - 1, SeqCst);
 
@@ -407,7 +505,7 @@ impl Log {
                 (None, None)
             };
 
-            self.iobufs.encapsulate(
+            iobufs.encapsulate(
                 item,
                 message_header,
                 destination,
@@ -417,12 +515,18 @@ impl Log {
             #[cfg(feature = "metrics")]
             M.log_reservation_success();
 
-            let pointer = if let Some(heap_id) = heap_id_opt {
-                DiskPtr::new_heap_item(reservation_lid, heap_id)
-            } else if let Some(heap_id) = heap_rewrite {
-                DiskPtr::new_heap_item(reservation_lid, heap_id)
+            let lid_to_store = if is_cold {
+                 reservation_lid | crate::pagecache::disk_pointer::STREAM_SELECTOR_MASK
             } else {
-                DiskPtr::new_inline(reservation_lid)
+                 reservation_lid
+            };
+            
+            let pointer = if let Some(heap_id) = heap_id_opt {
+                DiskPtr::new_heap_item(lid_to_store, heap_id)
+            } else if let Some(heap_id) = heap_rewrite {
+                DiskPtr::new_heap_item(lid_to_store, heap_id)
+            } else {
+                DiskPtr::new_inline(lid_to_store)
             };
 
             return Ok(Reservation {
@@ -442,7 +546,7 @@ impl Log {
     /// Called by Reservation on termination (completion or abort).
     /// Handles departure from shared state, and possibly writing
     /// the buffer to stable storage if necessary.
-    pub(super) fn exit_reservation(&self, iobuf: &Arc<IoBuf>) -> Result<()> {
+    pub(super) fn exit_reservation(&self, iobuf: &Arc<IoBuf>, is_cold: bool) -> Result<()> {
         let mut header = iobuf.get_header();
 
         // Decrement writer count, retrying until successful.
@@ -462,13 +566,22 @@ impl Log {
         // to 0 and it's sealed then we should write it to storage.
         if header::n_writers(header) == 0 && header::is_sealed(header) {
             if let Err(e) = self.config.global_error() {
-                let intervals = self.iobufs.intervals.lock();
+            
+                let intervals = if is_cold {
+                    self.cold_iobufs.as_ref().unwrap().intervals.lock()
+                } else {
+                    self.hot_iobufs.intervals.lock()
+                };
 
                 // having held the mutex makes this linearized
                 // with the notify below.
                 drop(intervals);
 
-                let _notified = self.iobufs.interval_updated.notify_all();
+                let _notified = if is_cold {
+                    self.cold_iobufs.as_ref().unwrap().interval_updated.notify_all()
+                } else {
+                     self.hot_iobufs.interval_updated.notify_all()
+                };
                 return Err(e);
             }
 
@@ -478,13 +591,43 @@ impl Log {
                  to log from exit_reservation",
                 lsn
             );
-            let iobufs2 = self.iobufs.clone();
+            let iobufs2 = if is_cold {
+                self.cold_iobufs.as_ref().unwrap().clone()
+            } else {
+                self.hot_iobufs.clone()
+            };
             let iobuf2 = iobuf.clone();
             threadpool::write_to_log(iobuf2, iobufs2);
 
             Ok(())
         } else {
             Ok(())
+        }
+    }
+}
+    
+
+    
+    // Helper function to recover the tip of a log file
+    // This is used for the Cold Log where we don't have snapshot support yet.
+fn recover_tip(file: &File, segment_size: usize) -> Result<(LogOffset, Lsn)> {
+    let len = file.metadata()?.len();
+    if len < segment_size as u64 {
+        return Ok((0, 0));
+    }
+    
+    let mut offset = (len / segment_size as u64) * segment_size as u64;
+    
+    if offset == len && offset > 0 {
+         offset -= segment_size as u64;
+    }
+    
+    match read_segment_header(file, offset) {
+        Ok(header) if header.ok => {
+             Ok((offset, header.lsn))
+        }
+        _ => {
+            Ok((offset, 0)) 
         }
     }
 }
@@ -496,8 +639,13 @@ impl Drop for Log {
             return;
         }
 
-        if let Err(e) = iobuf::flush(&self.iobufs) {
-            error!("failed to flush from IoBufs::drop: {}", e);
+        if let Err(e) = iobuf::flush(&self.hot_iobufs) {
+            error!("failed to flush hot from IoBufs::drop: {}", e);
+        }
+        if let Some(ref cold) = self.cold_iobufs {
+             if let Err(e) = iobuf::flush(cold) {
+                error!("failed to flush cold from IoBufs::drop: {}", e);
+            }
         }
 
         if !self.config.temporary {

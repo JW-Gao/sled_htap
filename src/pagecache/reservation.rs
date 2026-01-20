@@ -21,7 +21,11 @@ impl<'a> Drop for Reservation<'a> {
         // We auto-abort if the user never uses a reservation.
         if !self.flushed {
             if let Err(e) = self.flush(false) {
-                self.log.iobufs.set_global_error(e);
+                if self.pointer.is_cold() {
+                    self.log.cold_iobufs.as_ref().unwrap().set_global_error(e);
+                } else {
+                    self.log.hot_iobufs.set_global_error(e);
+                }
             }
         }
     }
@@ -85,7 +89,11 @@ impl<'a> Reservation<'a> {
 
             dst.copy_from_slice(&buf);
 
-            let mut intervals = self.log.iobufs.intervals.lock();
+            let mut intervals = if self.pointer.is_cold() {
+                 self.log.cold_iobufs.as_ref().unwrap().intervals.lock()
+            } else {
+                 self.log.hot_iobufs.intervals.lock()
+            };
             intervals.mark_batch((self.lsn, peg_lsn));
             drop(intervals);
 
@@ -138,7 +146,7 @@ impl<'a> Reservation<'a> {
                 std::mem::size_of::<u32>(),
             );
         }
-        self.log.exit_reservation(&self.iobuf)?;
+        self.log.exit_reservation(&self.iobuf, self.pointer.is_cold())?;
 
         Ok((self.lsn, self.pointer))
     }

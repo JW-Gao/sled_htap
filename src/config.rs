@@ -208,6 +208,10 @@ pub struct Inner {
     #[doc(hidden)]
     pub snapshot_after_ops: u64,
     #[doc(hidden)]
+    pub page_consolidation_threshold: usize,
+    #[doc(hidden)]
+    pub l2_merge_scan_interval_ms: u64,
+    #[doc(hidden)]
     pub version: (usize, usize),
     tmp_path: PathBuf,
     pub(crate) global_error: Arc<Atomic<Error>>,
@@ -239,6 +243,8 @@ impl Default for Inner {
             } else {
                 1_000_000
             },
+            page_consolidation_threshold: 10,
+            l2_merge_scan_interval_ms: 10_000,
             global_error: Arc::new(Atomic::default()),
             #[cfg(feature = "event_log")]
             event_log: Arc::new(crate::event_log::EventLog::default()),
@@ -346,6 +352,16 @@ impl Config {
 
         let file = config.open_file()?;
 
+        // [Dual Log Stream] Open the cold log file
+        // We use "db.cold" alongside "db"
+        let cold_path = config.get_path().join("db.cold");
+        let mut cold_options = fs::OpenOptions::new();
+        cold_options.create(true).read(true).write(true);
+        if config.create_new {
+            cold_options.create_new(true);
+        }
+        let cold_file = config.try_lock(cold_options.open(&cold_path)?)?;
+
         let heap_path = config.get_path().join("heap");
         let heap = Heap::start(&heap_path)?;
         maybe_fsync_directory(heap_path)?;
@@ -354,6 +370,7 @@ impl Config {
         let config = RunningConfig {
             inner: config,
             file: Arc::new(file),
+            cold_file: Some(Arc::new(cold_file)),
             heap: Arc::new(heap),
         };
 
@@ -462,6 +479,11 @@ impl Config {
             snapshot_after_ops,
             u64,
             "take a fuzzy snapshot of pagecache metadata after this many ops"
+        ),
+        (
+            page_consolidation_threshold,
+            usize,
+            "perform a page compaction after this many link updates"
         )
     );
 
@@ -736,6 +758,12 @@ impl Config {
         let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         f.set_len(new_len).expect("should be able to truncate");
     }
+    /// Set the interval for L2 background scanning (find candidates for cold merge).
+    pub fn l2_merge_scan_interval_ms(mut self, interval: u64) -> Config {
+        let inner = Arc::get_mut(&mut self.0).unwrap();
+        inner.l2_merge_scan_interval_ms = interval;
+        self
+    }
 }
 
 /// A Configuration that has an associated opened
@@ -745,6 +773,7 @@ impl Config {
 pub struct RunningConfig {
     inner: Config,
     pub(crate) file: Arc<File>,
+    pub(crate) cold_file: Option<Arc<File>>,
     pub(crate) heap: Arc<Heap>,
 }
 
@@ -762,6 +791,11 @@ impl Drop for RunningConfig {
         use fs2::FileExt;
         if Arc::strong_count(&self.file) == 1 {
             let _ = self.file.unlock();
+        }
+        if let Some(cold) = &self.cold_file {
+            if Arc::strong_count(cold) == 1 {
+                let _ = cold.unlock();
+            }
         }
     }
 }

@@ -1,4 +1,5 @@
 use std::{
+    fs::File,
     alloc::{alloc, dealloc, Layout},
     cell::UnsafeCell,
     sync::atomic::AtomicPtr,
@@ -279,6 +280,7 @@ impl StabilityIntervals {
 
 pub(crate) struct IoBufs {
     pub config: RunningConfig,
+    pub file: Arc<File>,
 
     // A pointer to the current IoBuf. This relies on crossbeam-epoch
     // for garbage collection when it gets swapped out, to ensure that
@@ -299,6 +301,10 @@ pub(crate) struct IoBufs {
     // file, and there may be buffers that have been written out-of-order
     // to stable storage due to interesting thread interleavings.
     pub stable_lsn: AtomicLsn,
+    
+    /// The next LSN to reserve. Shared between Hot and Cold logs to ensure global ordering.
+    pub next_lsn_to_reserve: Arc<AtomicLsn>,
+    
     pub max_reserved_lsn: AtomicLsn,
     pub max_header_stable_lsn: Arc<AtomicLsn>,
     pub segment_accountant: Mutex<SegmentAccountant>,
@@ -319,20 +325,29 @@ impl Drop for IoBufs {
 /// `IoBufs` is a set of lock-free buffers for coordinating
 /// writes to underlying storage.
 impl IoBufs {
-    pub fn start(config: RunningConfig, snapshot: &Snapshot) -> Result<IoBufs> {
+    // Updated start method to accept file and recovery coordinates explicitly
+    pub fn start(
+        config: RunningConfig,
+        snapshot: &Snapshot,
+        file: Arc<File>,
+        recovered_lid: Option<LogOffset>,
+        recovered_lsn: Option<Lsn>,
+        is_cold: bool,
+        shared_lsn_generator: Option<Arc<AtomicLsn>>,
+    ) -> Result<IoBufs> {
         let segment_cleaner = SegmentCleaner::default();
 
         let mut segment_accountant: SegmentAccountant =
             SegmentAccountant::start(
                 config.clone(),
                 snapshot,
+                recovered_lid,
                 segment_cleaner.clone(),
+                file.clone(),
+                is_cold,
             )?;
 
         let segment_size = config.segment_size;
-
-        let (recovered_lid, recovered_lsn) =
-            snapshot.recovered_coords(config.segment_size);
 
         let (next_lid, next_lsn, from_tip) =
             match (recovered_lid, recovered_lsn) {
@@ -342,6 +357,7 @@ impl IoBufs {
                         offset {}, recovered lsn {}",
                         next_lid, next_lsn
                     );
+                    segment_accountant.ensure_segment_active(next_lid, next_lsn);
                     (next_lid, next_lsn, true)
                 }
                 (None, None) => {
@@ -362,6 +378,35 @@ impl IoBufs {
                 }
                 (Some(_), None) => unreachable!(),
             };
+
+        // If a shared LSN generator is provided, use it. Otherwise use next_lsn.
+        // For shared generator, we trust the caller to have synchronized it.
+        let next_lsn_to_reserve = if let Some(lsn_gen) = shared_lsn_generator {
+            // If the shared generator is behind our recovered local LSN, that's a problem,
+            // but we assume caller handled max calculation.
+             // We still need to ensure *our* next_lsn aligns with what we expect locally?
+             // Actually, if we share, we just take the shared state. 
+             // But we need to verify we aren't overwriting data if the shared LSN is somehow OLDER than our tip?
+             // The caller (Log::start) will ensure the shared atomic is initialized to MAX(hot, cold).
+             if lsn_gen.load(Acquire) < next_lsn {
+                 // Forward the shared generator if we are ahead
+                 lsn_gen.fetch_max(next_lsn, SeqCst);
+             }
+             lsn_gen
+        } else {
+             Arc::new(AtomicLsn::new(next_lsn))
+        };
+        
+        // Update local next_lsn variable to match the generator's state
+        let next_lsn = next_lsn_to_reserve.load(Acquire);
+
+        // adjust next_lid to be aligned with next_lsn if the shared generator pulled
+        // next_lsn ahead of our local recovery point (e.g. cold log fell behind hot log)
+        let next_lid = if next_lsn > Lsn::try_from(next_lid).unwrap_or(0) {
+            next_lsn as LogOffset
+        } else {
+            next_lid
+        };
 
         assert!(next_lsn >= Lsn::try_from(next_lid).unwrap());
 
@@ -397,7 +442,7 @@ impl IoBufs {
 
         Ok(IoBufs {
             config,
-
+            file,
             iobuf: AtomicPtr::new(Arc::into_raw(Arc::new(iobuf)) as *mut IoBuf),
 
             intervals: Mutex::new(StabilityIntervals::new(stable)),
@@ -409,6 +454,7 @@ impl IoBufs {
             segment_accountant: Mutex::new(segment_accountant),
             segment_cleaner,
             deferred_segment_ops: stack::Stack::default(),
+            next_lsn_to_reserve,
         })
     }
 
@@ -451,6 +497,29 @@ impl IoBufs {
             };
             self.deferred_segment_ops.push(op, guard);
             Ok(())
+        }
+    }
+
+    pub(in crate::pagecache) fn sa_mark_remove(
+        &self,
+        pid: PageId,
+        cache_infos: &[CacheInfo],
+        guard: &Guard,
+    ) -> Result<()> {
+        let worked: Option<Result<()>> = self.try_with_sa(|sa| {
+            sa.mark_remove(pid, cache_infos)?;
+            Ok(())
+        });
+        
+        if let Some(res) = worked {
+             res
+        } else {
+             let op = SegmentOp::Remove {
+                 pid,
+                 cache_infos: cache_infos.to_vec(),
+             };
+             self.deferred_segment_ops.push(op, guard);
+             Ok(())
         }
     }
 
@@ -535,6 +604,7 @@ impl IoBufs {
 
         LogIter {
             config: self.config.clone(),
+            file: self.file.clone(),
             max_lsn: Some(self.stable()),
             cur_lsn: None,
             segment_base: None,
@@ -742,7 +812,7 @@ impl IoBufs {
         let stored_max_stable_lsn = iobuf.stored_max_stable_lsn;
 
         io_fail!(self, "buffer write");
-        let f = &self.config.file;
+        let f = &self.file;
         pwrite_all(f, data, log_offset)?;
         if !self.config.temporary {
             if iobuf.from_tip {

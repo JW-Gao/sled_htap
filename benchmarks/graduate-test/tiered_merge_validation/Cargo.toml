@@ -1,0 +1,12 @@
+[package]
+name = "tiered_merge_validation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sled = { path = "../../../" }
+hdrhistogram = "7.5" # 专业的延迟统计库
+rand = "0.8"
+log = "0.4"
+env_logger = "0.10"
+csv = "1.1"
