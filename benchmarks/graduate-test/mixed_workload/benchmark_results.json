@@ -1,0 +1,35 @@
+[
+{
+  "scenario": "Cols30-Read-Sel0.1",
+  "method": "Row",
+  "total_ops": 50000,
+  "duration_sec": 25.5619
+}
+,
+{
+  "scenario": "Cols30-Read-Sel0.1",
+  "method": "Column",
+  "total_ops": 50000,
+  "duration_sec": 20.3342
+}
+,
+{
+  "scenario": "Cols30-Read-Sel0.4",
+  "method": "Row",
+  "total_ops": 50000,
+  "duration_sec": 97.3336
+}
+,
+{
+  "scenario": "Cols30-Read-Sel0.4",
+  "method": "Column",
+  "total_ops": 50000,
+  "duration_sec": 77.6289
+}
+,
+{
+  "scenario": "Cols30-Read-Sel0.7",
+  "method": "Row",
+  "total_ops": 50000,
+  "duration_sec": 153.3158
+}
