@@ -1,0 +1,19 @@
+workload,delta,single_stream_ra,dual_stream_ra,ra_ratio
+"TP-Heavy (80% Row, 20% Col)",0.0,12.11,11.92,1.015
+"TP-Heavy (80% Row, 20% Col)",0.2,19.12,11.97,1.597
+"TP-Heavy (80% Row, 20% Col)",0.4,22.45,12.08,1.858
+"TP-Heavy (80% Row, 20% Col)",0.6,24.22,11.94,2.028
+"TP-Heavy (80% Row, 20% Col)",0.8,24.78,11.93,2.078
+"TP-Heavy (80% Row, 20% Col)",1.0,25.28,12.04,2.1
+"Balanced HTAP (50% Row, 50% Col)",0.0,11.06,11.21,0.987
+"Balanced HTAP (50% Row, 50% Col)",0.2,15.98,11.28,1.416
+"Balanced HTAP (50% Row, 50% Col)",0.4,17.6,11.29,1.558
+"Balanced HTAP (50% Row, 50% Col)",0.6,19.11,11.16,1.712
+"Balanced HTAP (50% Row, 50% Col)",0.8,19.83,11.32,1.752
+"Balanced HTAP (50% Row, 50% Col)",1.0,19.98,11.2,1.784
+"AP-Heavy (20% Row, 80% Col)",0.0,10.7,10.48,1.022
+"AP-Heavy (20% Row, 80% Col)",0.2,12.27,10.43,1.177
+"AP-Heavy (20% Row, 80% Col)",0.4,13.55,10.53,1.286
+"AP-Heavy (20% Row, 80% Col)",0.6,14.08,10.56,1.334
+"AP-Heavy (20% Row, 80% Col)",0.8,14.34,10.61,1.351
+"AP-Heavy (20% Row, 80% Col)",1.0,14.57,10.52,1.385

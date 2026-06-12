@@ -13,7 +13,7 @@ with open('merge_impact_results.csv', 'r') as f:
 fig, ax = plt.subplots(figsize=(12, 6))
 
 # Set font for Chinese characters
-plt.rcParams['font.sans-serif'] = ['AR PL UMing CN', 'DejaVu Sans', 'Bitstream Vera Sans', 'sans-serif'] 
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'DejaVu Sans', 'Bitstream Vera Sans', 'sans-serif'] 
 plt.rcParams['axes.unicode_minus'] = False 
 
 ax.plot(ops, latencies, marker='.', linestyle='-', color='tab:purple', label='单次写入延迟 (Latency)')

@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "ycsb_common",
+    "bf_tree_test",
+    "fjall_test",
+    "blp_tree_test"
+]
+resolver = "2"

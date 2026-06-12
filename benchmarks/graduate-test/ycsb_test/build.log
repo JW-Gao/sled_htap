@@ -1,0 +1,96 @@
+warning: bf_tree_test v0.1.0 (/home/rat/sled/benchmarks/graduate-test/ycsb_test/bf_tree_test) ignoring invalid dependency `bf-tree` which is missing a lib target
+       Fresh cfg-if v1.0.0
+       Fresh libc v0.2.180
+       Fresh memchr v2.7.6
+       Fresh unicode-ident v1.0.22
+       Fresh getrandom v0.2.17
+       Fresh utf8parse v0.2.2
+       Fresh autocfg v1.5.0
+       Fresh rand_core v0.6.4
+       Fresh anstyle-parse v0.2.7
+       Fresh proc-macro2 v1.0.106
+       Fresh zerocopy v0.8.39
+       Fresh adler2 v2.0.1
+       Fresh colorchoice v1.0.4
+       Fresh is_terminal_polyfill v1.70.2
+       Fresh simd-adler32 v0.3.8
+       Fresh anstyle v1.0.13
+       Fresh ppv-lite86 v0.2.21
+       Fresh quote v1.0.44
+       Fresh anstyle-query v1.1.5
+       Fresh crossbeam-utils v0.8.21
+       Fresh miniz_oxide v0.8.9
+       Fresh crc32fast v1.5.0
+       Fresh aho-corasick v1.1.4
+       Fresh syn v2.0.114
+       Fresh rand_chacha v0.3.1
+       Fresh anstream v0.6.21
+       Fresh regex-syntax v0.8.9
+       Fresh minimal-lexical v0.2.1
+       Fresh strsim v0.11.1
+       Fresh heck v0.5.0
+       Fresh clap_lex v0.7.7
+       Fresh rand v0.8.5
+       Fresh nom v7.1.3
+       Fresh clap_derive v4.5.55
+       Fresh regex-automata v0.4.14
+       Fresh flate2 v1.1.9
+       Fresh crossbeam-channel v0.5.15
+       Fresh clap_builder v4.5.57
+       Fresh num-traits v0.2.19
+       Fresh byteorder v1.5.0
+       Fresh base64 v0.21.7
+       Fresh regex v1.12.3
+       Fresh anyhow v1.0.101
+       Fresh zipf v7.0.2
+       Fresh is-terminal v0.4.17
+       Fresh clap v4.5.57
+       Fresh hdrhistogram v7.5.4
+       Fresh log v0.4.29
+       Fresh termcolor v1.4.1
+       Fresh humantime v2.3.0
+       Fresh ycsb_common v0.1.0 (/home/rat/sled/benchmarks/graduate-test/ycsb_test/ycsb_common)
+warning: use of deprecated struct `zipf::ZipfDistribution`: prefer rand_distr::Zipf
+ --> ycsb_common/src/generator.rs:3:11
+  |
+3 | use zipf::ZipfDistribution;
+  |           ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated struct `zipf::ZipfDistribution`: prefer rand_distr::Zipf
+ --> ycsb_common/src/generator.rs:6:10
+  |
+6 |     Zipf(ZipfDistribution),
+  |          ^^^^^^^^^^^^^^^^
+
+warning: use of deprecated struct `zipf::ZipfDistribution`: prefer rand_distr::Zipf
+  --> ycsb_common/src/generator.rs:13:20
+   |
+13 | ...   let dist = ZipfDistribution::new(items, skew).map_err(|...
+   |                  ^^^^^^^^^^^^^^^^
+
+       Fresh env_logger v0.10.2
+warning: `ycsb_common` (lib) generated 3 warnings
+    Checking bf_tree_test v0.1.0 (/home/rat/sled/benchmarks/graduate-test/ycsb_test/bf_tree_test)
+     Running `/home/rat/.rustup/toolchains/1.85.0-x86_64-unknown-linux-gnu/bin/rustc --crate-name bf_tree_test --edition=2021 bf_tree_test/src/main.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,metadata -C embed-bitcode=no -C debuginfo=2 --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=ff6bd81c58aa61d8 -C extra-filename=-602e92e99b49c145 --out-dir /home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps -C incremental=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/incremental -L dependency=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps --extern anyhow=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/libanyhow-b29dae91c9fa4fae.rmeta --extern clap=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/libclap-1caeaff35369bbad.rmeta --extern env_logger=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/libenv_logger-2d40fbbe2664a05d.rmeta --extern log=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/liblog-0ab09842a61faa3a.rmeta --extern rand=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/librand-d22b00539a387234.rmeta --extern ycsb_common=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/libycsb_common-6991b4de71d6876e.rmeta`
+error[E0463]: can't find crate for `bf_tree`
+ --> bf_tree_test/src/main.rs:3:1
+  |
+3 | extern crate bf_tree;
+  | ^^^^^^^^^^^^^^^^^^^^^ can't find crate
+
+warning: unused import: `std::sync::Arc`
+ --> bf_tree_test/src/main.rs:5:5
+  |
+5 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+For more information about this error, try `rustc --explain E0463`.
+warning: `bf_tree_test` (bin "bf_tree_test") generated 1 warning
+error: could not compile `bf_tree_test` (bin "bf_tree_test") due to 1 previous error; 1 warning emitted
+
+Caused by:
+  process didn't exit successfully: `/home/rat/.rustup/toolchains/1.85.0-x86_64-unknown-linux-gnu/bin/rustc --crate-name bf_tree_test --edition=2021 bf_tree_test/src/main.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,metadata -C embed-bitcode=no -C debuginfo=2 --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=ff6bd81c58aa61d8 -C extra-filename=-602e92e99b49c145 --out-dir /home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps -C incremental=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/incremental -L dependency=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps --extern anyhow=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/libanyhow-b29dae91c9fa4fae.rmeta --extern clap=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/libclap-1caeaff35369bbad.rmeta --extern env_logger=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/libenv_logger-2d40fbbe2664a05d.rmeta --extern log=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/liblog-0ab09842a61faa3a.rmeta --extern rand=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/librand-d22b00539a387234.rmeta --extern ycsb_common=/home/rat/sled/benchmarks/graduate-test/ycsb_test/target/debug/deps/libycsb_common-6991b4de71d6876e.rmeta` (exit status: 1)

@@ -1,0 +1,10 @@
+Engine,Workload,Throughput(ops/sec),Latency_P99(us)
+Bf-tree,A,13711.27,433
+Bf-tree,B,17118.01,177
+Bf-tree,E,12636.37,354
+Disco-LSM,A,19537.20,187
+Disco-LSM,B,13902,295
+Disco-LSM,E,9051.42,653
+Blp-tree,A,19795.13,163
+Blp-tree,B,16390.94,277
+Blp-tree,E,10273.55,353

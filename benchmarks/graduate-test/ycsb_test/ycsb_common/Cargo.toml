@@ -1,0 +1,11 @@
+[package]
+name = "ycsb_common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rand = "0.8"
+zipf = "7.0.0"
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+hdrhistogram = "7.5"

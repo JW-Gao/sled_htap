@@ -1,0 +1,13 @@
+[package]
+name = "blp_tree_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ycsb_common = { path = "../ycsb_common" }
+sled = { path = "../../../.." } # Root sled directory
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+rand = "0.8"
+log = "0.4"
+env_logger = "0.10"

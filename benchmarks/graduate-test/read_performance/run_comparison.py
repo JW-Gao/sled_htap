@@ -128,8 +128,8 @@ def plot_charts(data):
     
     # Plot QPS
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar([i - width/2 for i in x], baseline_qps, width, label='原生 bw-tree(Baseline)')
-    ax.bar([i + width/2 for i in x], ours_qps, width, label='优化后 (row-level+column-level)')
+    ax.bar([i - width/2 for i in x], baseline_qps, width, label='Baseline')
+    ax.bar([i + width/2 for i in x], ours_qps, width, label='Blp-tree')
     
     ax.set_xlabel('读写比例', fontsize=12)
     ax.set_ylabel('吞吐量 (QPS)', fontsize=12)
@@ -146,8 +146,8 @@ def plot_charts(data):
     
     # Plot Latency
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar([i - width/2 for i in x], baseline_lat, width, label='原生 bw-tree (Baseline)')
-    ax.bar([i + width/2 for i in x], ours_lat, width, label='优化后 (row-level+column-level)')
+    ax.bar([i - width/2 for i in x], baseline_lat, width, label='Baseline')
+    ax.bar([i + width/2 for i in x], ours_lat, width, label='Blp-tree')
     
     ax.set_xlabel('读写比例', fontsize=12)
     ax.set_ylabel('延迟 (微秒)', fontsize=12)

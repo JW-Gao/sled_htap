@@ -53,11 +53,11 @@ def plot_execution_time_comparison(df: pd.DataFrame, output_dir: str = "."):
             y_optimized = df_narrow['优化时间(s)']
             
             width = 3
-            ax_narrow.bar(x - width/2, y_baseline, width, label='基线版本', alpha=0.8, color='#e74c3c')
-            ax_narrow.bar(x + width/2, y_optimized, width, label='优化版本', alpha=0.8, color='#2ecc71')
+            ax_narrow.bar(x - width/2, y_baseline, width, label='Baseline', alpha=0.8, color='#e74c3c')
+            ax_narrow.bar(x + width/2, y_optimized, width, label='DSP-Tree', alpha=0.8, color='#2ecc71')
         
         ax_narrow.set_xlabel('AP数据访问比例 (%)', fontsize=11)
-        ax_narrow.set_ylabel('执行时间 (秒)', fontsize=11)
+        ax_narrow.set_ylabel('执行时间 (s)', fontsize=11)
         ax_narrow.set_title(f'窄表 - {workload_name}', fontsize=12, fontweight='bold')
         ax_narrow.legend()
         ax_narrow.grid(True, alpha=0.3, linestyle='--')
@@ -72,11 +72,11 @@ def plot_execution_time_comparison(df: pd.DataFrame, output_dir: str = "."):
             y_baseline = df_wide['基线时间(s)']
             y_optimized = df_wide['优化时间(s)']
             
-            ax_wide.bar(x - width/2, y_baseline, width, label='基线版本', alpha=0.8, color='#e74c3c')
-            ax_wide.bar(x + width/2, y_optimized, width, label='优化版本', alpha=0.8, color='#2ecc71')
+            ax_wide.bar(x - width/2, y_baseline, width, label='Baseline', alpha=0.8, color='#e74c3c')
+            ax_wide.bar(x + width/2, y_optimized, width, label='DSP-Tree', alpha=0.8, color='#2ecc71')
         
         ax_wide.set_xlabel('AP数据访问比例 (%)', fontsize=11)
-        ax_wide.set_ylabel('执行时间 (秒)', fontsize=11)
+        ax_wide.set_ylabel('执行时间 (s)', fontsize=11)
         ax_wide.set_title(f'宽表 - {workload_name}', fontsize=12, fontweight='bold')
         ax_wide.legend()
         ax_wide.grid(True, alpha=0.3, linestyle='--')
