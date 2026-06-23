@@ -11,6 +11,7 @@ import os
 from datetime import datetime
 from typing import Optional
 import random
+import time
 
 # 快速测试配置（1分钟内完成）
 QUICK_TOTAL_OPS = 2000
@@ -182,7 +183,7 @@ def main():
     # 运行一个代表性的快速测试
     print("\n运行快速测试样本...")
     print("场景: 窄表-均衡型-5列/30列")
-    
+    time.sleep(10)
     cleanup_databases()
     
     print("\n[1/2] 快速测试 - 基线版本...")

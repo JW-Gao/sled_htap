@@ -1,9 +1,0 @@
-[package]
-name = "columnar_test"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-sled = { path = "../../../" }
-log = "0.4"
-env_logger = "0.9"

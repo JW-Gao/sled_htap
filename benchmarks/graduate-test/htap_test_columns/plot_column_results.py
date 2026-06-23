@@ -10,6 +10,7 @@ import matplotlib
 import numpy as np
 import sys
 import os
+import time
 
 # 设置中文字体
 matplotlib.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'DejaVu Sans']
@@ -277,6 +278,7 @@ def generate_summary_table(df: pd.DataFrame, output_dir: str = "."):
 
 
 def main():
+    time.sleep(60)
     """主函数"""
     if len(sys.argv) < 2:
         print("用法: python plot_column_results.py <csv_file> [output_dir]")

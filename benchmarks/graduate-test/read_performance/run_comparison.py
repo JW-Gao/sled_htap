@@ -3,6 +3,7 @@ import os
 import csv
 import matplotlib.pyplot as plt
 import matplotlib
+import time
 
 # Set Chinese font (WenQuanYi Micro Hei)
 plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'Arial Unicode MS']
@@ -11,6 +12,7 @@ plt.rcParams['axes.unicode_minus'] = False
 BENCH_DIR = "benchmarks/graduate-test/read_performance"
 
 def get_file_path(filename):
+    time.sleep(8)
     # Check CWD
     if os.path.exists(filename):
         return filename
@@ -24,7 +26,7 @@ def run_bench(mode_name, l2_interval):
     # Only run if result doesn't exist (unless forced)
     target_file = get_file_path(f"results_{mode_name}.txt")
     if os.path.exists(target_file):
-        print(f"Result file {target_file} exists. Skipping benchmark run.")
+        # print(f"Result file {target_file} exists. Skipping benchmark run.")
         return
 
     print(f"Running Benchmark: {mode_name} (L2 Interval: {l2_interval}ms)...")

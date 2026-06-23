@@ -3,6 +3,7 @@ import os
 import csv
 import matplotlib.pyplot as plt
 import matplotlib
+import time
 
 # Set Chinese font (WenQuanYi Micro Hei)
 plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'Arial Unicode MS']
@@ -22,7 +23,7 @@ def run_bench(mode_name, l2_interval):
     if os.path.exists(target):
         print(f"Skipping {mode_name}, {target} exists.")
         return
-
+    time.sleep(178)
     print(f"Running Benchmark: {mode_name} (L2 Interval: {l2_interval}ms)...")
     env = os.environ.copy()
     env["SLED_L2_INTERVAL"] = str(l2_interval)

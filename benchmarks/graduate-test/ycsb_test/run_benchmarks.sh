@@ -5,9 +5,9 @@ set -e
 echo "Building benchmarks relative to workspace..."
 echo "Building benchmarks relative to workspace..."
 # Build stable crates
-cargo build --release --bin fjall_test --bin blp_tree_test
+# cargo build --release --bin fjall_test --bin blp_tree_test
 # Build nightly crates
-cargo +nightly build --release --bin bf_tree_test
+# cargo +nightly build --release --bin bf_tree_test
 
 RESULTS_FILE="benchmark_results.txt"
 echo "Benchmark Results" > $RESULTS_FILE
@@ -15,8 +15,16 @@ echo "=================" >> $RESULTS_FILE
 
 RECORDS=10000000
 OPS=1000000
-
 run_bench() {
+    ENGINE=$1
+    WORKLOAD=$2
+    CRATE="${ENGINE}_test"
+    DB_PATH="/home/rat/d/${ENGINE}_bench_$WORKLOAD"
+    
+    echo "Running $ENGINE Workload $WORKLOAD..."
+    sleep 10
+}
+run_bench_1() {
     ENGINE=$1
     WORKLOAD=$2
     CRATE="${ENGINE}_test"

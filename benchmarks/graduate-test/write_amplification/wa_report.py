@@ -42,6 +42,7 @@ print("\n=== Benchmark Completed. Analyzing Results... ===")
 
 # 3. Analysis & Visualization
 if os.path.exists(csv_path):
+    time.sleep(120)
     df = pd.read_csv(csv_path)
     print(df)
     

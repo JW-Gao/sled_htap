@@ -1,8 +1,0 @@
-test_id,tp_threads,ap_threads,tp_ap_ratio,write_pct,ap_range_frac,l2_on_tp_tps,l2_off_tp_tps,tp_change_pct,l2_on_ap_qps,l2_off_ap_qps,ap_change_pct
-test1_balanced_1_1,8,8,8:8,20,0.2,22558,24100,-11.50,2597,967,168.56
-test2_tp_heavy_3_1,12,4,12:4,20,0.2,19632,20136,-13.20,2732,552,213.77
-test3_ap_heavy_1_3,4,12,4:12,20,0.2,21248,22175,-13.20,2599,959,171.01
-test4_tp_moderate_5_3,10,6,10:6,20,0.2,22128,22268,-14.10,2493,954,161.32
-test5_ap_moderate_3_5,6,10,6:10,20,0.2,18448,20314,-9.10,3538,836,181.10
-test6_balanced_30write,8,8,8:8,30,0.2,19730,23094,-10.70,3146,1002,194.01
-test7_balanced_50write,8,8,8:8,50,0.2,21177,22197,-9.10,2886,977,195.39
